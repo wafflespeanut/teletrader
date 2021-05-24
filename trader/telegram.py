@@ -1,5 +1,3 @@
-import json
-import os
 import logging
 
 from telethon import TelegramClient, events
@@ -8,13 +6,8 @@ from telethon import utils
 
 
 class TeleTrader(TelegramClient):
-    def __init__(self, api_id, api_hash, session=None, state_path=None, loop=None):
-        self.state = {}
-        self.state_path = state_path
-        if state_path is not None and os.path.exists(state_path):
-            with open(state_path) as fd:
-                self.state = json.load(fd)
-
+    def __init__(self, api_id, api_hash, session=None, state={}, loop=None):
+        self.state = state or {}
         super().__init__(session, api_id, api_hash, loop=loop)
         if session is None:
             logging.info("Setting test server")
@@ -32,8 +25,6 @@ class TeleTrader(TelegramClient):
             await self.run_until_disconnected()
         finally:
             await self.disconnect()
-            with open(self.state_path, "w") as fd:
-                json.dump(self.state, fd)
 
     async def message_handler(self, event: Message):
         chat = await event.get_chat()
