@@ -20,7 +20,7 @@ loop = asyncio.get_event_loop()
 # loop.run_until_complete(client.run())
 
 state = {}
-if STATE_PATH is not None:
+if STATE_PATH is not None and os.path.exists(STATE_PATH):
     with open(STATE_PATH) as fd:
         state = json.load(fd)
 
@@ -28,7 +28,7 @@ if STATE_PATH is not None:
 async def main():
     t = FuturesTrader()
     await t.init(API_KEY, API_SECRET, state=state, test=True, loop=loop)
-    await t.place_order(Signal("BTC", 39793, 35000, [40000, 41000, 41500], wait_entry=True))
+    await t.place_order(Signal("BTC", 39793.5, 39792, [40000, 41000, 41500], wait_entry=True))
     await asyncio.sleep(3600)
 
 try:

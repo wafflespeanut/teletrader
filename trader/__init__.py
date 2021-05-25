@@ -10,7 +10,8 @@ from binance import AsyncClient, BinanceSocketManager
 from .user_stream import UserStream
 
 STREAM_RECONNECT_INTERVAL = 6 * 60 * 60
-WAIT_ORDER_EXPIRY = 20
+WAIT_ORDER_EXPIRY = 24 * 60 * 60
+ORDER_WATCH_INTERVAL = 5 * 60
 MAX_TARGETS = 5
 
 
@@ -149,7 +150,6 @@ class FuturesTrader:
         self.prices: dict = {}
         self.symbols: dict = {}
         self.price_streamer = None
-        self.acct_streamer = None
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.balance = 0
@@ -165,6 +165,7 @@ class FuturesTrader:
             self.state["streams"] = []
         if not self.state.get("orders"):
             self.state["orders"] = {}
+        await self._watch_orders()
         await self._subscribe_futures_user()
         await self._resubscribe_futures()
         resp = await self.client.futures_exchange_info()
@@ -233,7 +234,7 @@ class FuturesTrader:
                     "tgt": signal.targets,
                     "frc": signal.fraction,
                     "lev": signal.leverage,
-                    "exp": int(time.time()) + 24 * 60 * 60,  # 1 day expiry by default
+                    "exp": int(time.time()) + WAIT_ORDER_EXPIRY,  # 1 day expiry by default
                     "t_ord": [],
                 }
                 logging.info(f"Created order {order_id} for signal: {signal}, "
@@ -246,36 +247,12 @@ class FuturesTrader:
             await self._place_collection_orders(order_id)
 
     async def _place_collection_orders(self, order_id):
-        async with self.olock:
-            odata = self.state["orders"][order_id]
-            symbol = odata["sym"]
-            if odata.get("s_ord") is None:
-                sl_order_id = OrderID.stop_loss()
-                params = {
-                    "symbol": symbol,
-                    "side": "SELL" if odata["side"] == "BUY" else "BUY",
-                    "type": OrderType.STOP_MARKET,
-                    "newClientOrderId": sl_order_id,
-                    "stopPrice": self._round_price(symbol, odata["sl"]),
-                    "closePosition": True,
-                }
-                try:
-                    resp = await self.client.futures_create_order(**params)
-                    odata["s_ord"] = sl_order_id
-                    self.state["orders"][sl_order_id] = {
-                        "parent": order_id,
-                    }
-                    logging.info(f"Created SL order {sl_order_id} for parent {order_id}, "
-                                 f"resp: {resp}, params: {json.dumps(params)}")
-                except Exception as err:
-                    logging.error(f"Failed to create SL order for parent {order_id}: {err}, "
-                                  f"params: {json.dumps(params)}")
-            else:
-                logging.warning(f"SL order already exists for parent {order_id}")
+        await self._place_sl_order(order_id)
 
         targets = []
         async with self.olock:
             odata = self.state["orders"][order_id]
+            symbol = odata["sym"]
             targets = odata["tgt"][:MAX_TARGETS]
             if odata.get("t_ord"):
                 logging.warning(f"TP order(s) already exist for parent {order_id}")
@@ -320,7 +297,7 @@ class FuturesTrader:
                     except Exception as err:
                         logging.exception(f"Failed to handle event {msg}: {err}")
 
-        self.acct_streamer = asyncio.ensure_future(_handler())
+        asyncio.ensure_future(_handler())
 
     async def _handle_event(self, msg: dict):
         if msg["e"] == "ACCOUNT_UPDATE":
@@ -332,35 +309,117 @@ class FuturesTrader:
             info = msg["o"]
             order_id = info["c"]
             has_filled = info["X"] == "FILLED"
-            if OrderID.is_wait(order_id) and has_filled:
+            if has_filled:
                 # We might get duplicated data when we switch connections, so do some checks
                 async with self.olock:
                     o = self.state["orders"].get(order_id)
                     if o is None:
-                        logging.warning(f"Received wait order {order_id} but missing in state")
+                        logging.warning(f"Received order {order_id} but missing in state")
                         return
-                logging.info(f"Placing TP/SL orders for fulfilled order {order_id}")
-                await self._place_collection_orders(order_id)
+                if OrderID.is_wait(order_id):
+                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id}")
+                    await self._place_collection_orders(order_id)
+                elif OrderID.is_stop_loss(order_id):
+                    async with self.olock:
+                        logging.info(f"Order {order_id} hit stop loss. Closing position and removing orders...")
+                        sl = self.state["orders"].pop(order_id)
+                        parent = self.state["orders"].pop(sl["parent"])
+                        for tp in parent["t_ord"]:
+                            self.state["orders"].pop(tp)
+                            try:
+                                resp = await self.client.futures_cancel_order(
+                                    symbol=parent["sym"],
+                                    origClientOrderId=tp,
+                                )
+                                logging.info(f"Cancelled TP order {tp} for parent {sl['parent']}, resp: {resp}")
+                            except Exception as err:
+                                logging.error(f"Failed to cancel TP order for parent {sl['parent']}: {err}")
+                elif OrderID.is_target(order_id):
+                    logging.info(f"TP order {order_id} hit. Moving stop loss...")
+                    await self._move_stop_loss(order_id)
+
+    async def _move_stop_loss(self, tp_id: str):
+        async with self.olock:
+            tp = self.state["orders"].pop(tp_id)
+            parent = self.state["orders"][tp["parent"]]
+            targets = parent["t_ord"]
+            if tp_id not in targets:
+                if parent.get("s_ord") is None:
+                    logging.warning(f"SL doesn't exist for order {parent}")
+                    return
+                logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}")
+                new_price = parent["entry"]
+            elif tp_id == targets[-1]:
+                logging.info(f"All TP orders hit. Removing parent {parent}")
+                self.state.pop(tp["parent"])
+                self.state.pop(parent["s_ord"])
+                return
+            else:
+                idx = targets.index(tp_id)
+                new_price = parent["entry"] if idx == 0 else parent["tgt"][idx - 1]
+
+        await self._place_sl_order(tp["parent"], new_price)
+
+    async def _place_sl_order(self, parent_id: str, new_price=None):
+        async with self.olock:
+            odata = self.state["orders"][parent_id]
+            symbol = odata["sym"]
+            sl_order_id = OrderID.stop_loss()
+            if odata.get("s_ord") is not None:
+                if new_price is None:
+                    logging.warning(f"SL order already exists for parent {parent_id}")
+                    return
+                try:
+                    logging.info(f"Moving SL order for {parent_id} to new price {new_price}")
+                    resp = await self.client.futures_cancel_order(
+                        symbol=symbol,
+                        origClientOrderId=odata["s_ord"],
+                    )
+                    logging.info(f"Cancelled SL order {odata['s_ord']} for parent {parent_id}, resp: {resp}")
+                except Exception as err:
+                    logging.error(f"Failed to cancel SL order for parent {parent_id}: {err}")
+            params = {
+                "symbol": symbol,
+                "side": "SELL" if odata["side"] == "BUY" else "BUY",
+                "type": OrderType.STOP_MARKET,
+                "newClientOrderId": sl_order_id,
+                "stopPrice": self._round_price(symbol, new_price if new_price is not None else odata["sl"]),
+                "closePosition": True,
+            }
+            try:
+                resp = await self.client.futures_create_order(**params)
+                odata["s_ord"] = sl_order_id
+                self.state["orders"][sl_order_id] = {
+                    "parent": parent_id,
+                }
+                logging.info(f"Created SL order {sl_order_id} for parent {parent_id}, "
+                             f"resp: {resp}, params: {json.dumps(params)}")
+            except Exception as err:
+                logging.error(f"Failed to create SL order for parent {parent_id}: {err}, "
+                              f"params: {json.dumps(params)}")
 
     async def _resubscribe_futures(self, add: str = None, remove: str = None):
         async with self.slock:
+            num_streams = len(set(self.state["streams"]))
             resub = self.price_streamer is None
             if add is not None:
                 add = add.upper()
-                if add not in self.state["streams"]:
-                    self.state["streams"].append(add)
-                    resub = True
+                # We should have duplicates because it should be possible to long/short
+                # on top of an existing long/short.
+                self.state["streams"].append(add)
             if remove is not None:
                 remove = remove.upper()
                 if remove in self.state["streams"]:
                     self.state["streams"].remove(remove)
-                    resub = True
+
+            if num_streams != len(set(self.state["streams"])):
+                resub = True
 
             if resub and self.price_streamer is not None:
                 logging.info("Cancelling ongoing ws stream for resubscribing")
                 self.price_streamer.cancel()
 
-            symbols = self.state["streams"]
+            symbols = set(self.state["streams"])
             if not symbols:
                 return
 
@@ -377,6 +436,35 @@ class FuturesTrader:
                         logging.error(f"Failed to get price for {msg['stream']}: {err}")
 
         self.price_streamer = asyncio.ensure_future(_streamer())
+
+    async def _watch_orders(self):
+        async def _watcher():
+            while True:
+                now = time.time()
+                async with self.olock:
+                    removed = []
+                    for order_id, order in self.state["orders"].items():
+                        if not OrderID.is_wait(order_id):
+                            continue
+                        if order.get("t_ord"):
+                            continue
+                        if now < order["exp"]:
+                            continue
+                        logging.info(f"Wait order {order_id} has expired. Removing...")
+                        removed.append(order_id)
+                        try:
+                            resp = await self.client.futures_cancel_order(
+                                symbol=order["sym"],
+                                origClientOrderId=order_id,
+                            )
+                            logging.info(f"Cancelled wait order {order_id}, resp: {resp}")
+                        except Exception as err:
+                            logging.error(f"Failed to cancel wait order {order_id}: {err}")
+                    for order_id in removed:
+                        self.state["orders"].pop(order_id)
+                await asyncio.sleep(ORDER_WATCH_INTERVAL)
+
+        asyncio.ensure_future(_watcher())
 
     # MARK: Rouding for min quantity and min price for symbols
 
