@@ -69,7 +69,6 @@ class OrderID:
 
 
 class FuturesTrader:
-
     def __init__(self):
         self.client: AsyncClient = None
         self.state: dict = None
@@ -107,10 +106,7 @@ class FuturesTrader:
         for ch in CHANNELS:
             if ch.chan_id != chat_id:
                 continue
-            try:
-                return ch.parse(text)
-            except Exception as err:
-                logging.info(f"Ignoring message due to parse failure: {err}")
+            return ch.parse(text)
 
     async def place_order(self, signal: Signal):
         await self._resubscribe_futures(add=signal.coin)
@@ -159,6 +155,7 @@ class FuturesTrader:
                     "tgt": signal.targets,
                     "frc": signal.fraction,
                     "lev": signal.leverage,
+                    "tag": signal.tag,
                     "exp": int(time.time()) + WAIT_ORDER_EXPIRY,  # 1 day expiry by default
                     "t_ord": [],
                 }
@@ -170,6 +167,42 @@ class FuturesTrader:
 
         if not signal.wait_entry:  # Place SL and limit orders for market order
             await self._place_collection_orders(order_id)
+
+    async def close_trades(self, tag, coin=None):
+        if coin is None:
+            logging.info(f"Attempting to close all trades associated with channel {tag}")
+        else:
+            logging.info(f"Attempting to close {coin} trades associated with channel {tag}")
+        async with self.olock:
+            removed = []
+            for order_id, order in self.state["orders"].values():
+                if order.get("tag") != tag:
+                    continue
+                if coin is not None and order["sym"] != f"{coin}USDT":
+                    continue
+                children = [order["s_ord"]] + order["t_ord"]
+                removed += children
+                for oid in children:
+                    try:
+                        resp = await self.client.futures_cancel_order(
+                            symbol=order["sym"],
+                            origClientOrderId=oid,
+                        )
+                        logging.info(f"Cancelled existing order {oid} for {order}, resp: {resp}")
+                    except Exception as err:
+                        logging.error(f"Failed to cancel order {oid} for {order_id}, err: {err}")
+                try:
+                    resp = await self.client.futures_create_order(
+                        symbol=order["sym"],
+                        side="SELL" if order["side"] == "BUY" else "BUY",
+                        type=OrderType.MARKET,
+                        closePosition=True,
+                    )
+                    logging.info(f"Closed position for {order}, resp: {resp}")
+                except Exception as err:
+                    logging.error(f"Failed to close position for {order_id}, err: {err}")
+            for oid in removed:
+                self.state["orders"].pop(oid, None)
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
@@ -228,7 +261,7 @@ class FuturesTrader:
         if msg["e"] == "ACCOUNT_UPDATE":
             for info in msg["a"]["B"]:
                 if info["a"] == "USDT":
-                    self.balance = info["cw"]
+                    self.balance = float(info["cw"])
                     logging.info(f"Current balance: {self.balance}")
         elif msg["e"] == "ORDER_TRADE_UPDATE":
             info = msg["o"]
@@ -246,19 +279,19 @@ class FuturesTrader:
                     await self._place_collection_orders(order_id)
                 elif OrderID.is_stop_loss(order_id):
                     async with self.olock:
-                        logging.info(f"Order {order_id} hit stop loss. Closing position and removing orders...")
+                        logging.info(f"Order {order_id} hit stop loss. Removing TP orders...")
                         sl = self.state["orders"].pop(order_id)
                         parent = self.state["orders"].pop(sl["parent"])
-                        for tp in parent["t_ord"]:
-                            self.state["orders"].pop(tp, None)  # It might not exist
+                        for oid in parent["t_ord"]:
+                            self.state["orders"].pop(oid, None)  # It might not exist
                             try:
                                 resp = await self.client.futures_cancel_order(
                                     symbol=parent["sym"],
-                                    origClientOrderId=tp,
+                                    origClientOrderId=oid,
                                 )
-                                logging.info(f"Cancelled TP order {tp} for parent {sl['parent']}, resp: {resp}")
+                                logging.info(f"Cancelled TP order {oid} for parent {sl['parent']}, resp: {resp}")
                             except Exception as err:
-                                logging.error(f"Failed to cancel TP order for parent {sl['parent']}: {err}")
+                                logging.error(f"Failed to cancel TP order {oid} for parent {sl['parent']}: {err}")
                 elif OrderID.is_target(order_id):
                     logging.info(f"TP order {order_id} hit. Moving stop loss...")
                     await self._move_stop_loss(order_id)

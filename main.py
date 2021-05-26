@@ -23,7 +23,7 @@ if STATE_PATH is not None and os.path.exists(STATE_PATH):
 
 
 async def main():
-    client = TeleTrader(API_ID, API_HASH, SESSION_PATH, loop=loop)
+    client = TeleTrader(API_ID, API_HASH, session=SESSION_PATH, state=state, loop=loop)
     await client.init(API_KEY, API_SECRET)
     await client.run()
 

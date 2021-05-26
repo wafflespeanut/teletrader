@@ -1,10 +1,17 @@
 import math
+import re
+
+
+class CloseTradeException(Exception):
+    def __init__(self, tag, coin=None):
+        self.tag = tag
+        self.coin = coin
 
 
 class Signal:
     MIN_PRECISION = 6
 
-    def __init__(self, coin, entry, sl, targets, fraction=0.025, leverage=10, wait_entry=False):
+    def __init__(self, coin, entry, sl, targets, fraction=0.025, leverage=10, wait_entry=False, tag=None):
         self.coin = coin
         self.entry = entry
         self.sl = sl
@@ -12,6 +19,7 @@ class Signal:
         self.fraction = fraction
         self.leverage = leverage
         self.wait_entry = wait_entry
+        self.tag = tag
 
     @property
     def is_long(self):
@@ -56,16 +64,34 @@ class BFP:
 
     @classmethod
     def parse(cls, text: str) -> Signal:
-        text = text.replace("\n\n", "\n")
-        lines = text.split("\n")
-        assert lines[0].endswith("Signal")
-        assert lines[1].endswith("ENTRY POINT")
-        coin = lines[2].split("/")[0].split("#")[-1]
-        entry = float(lines[3].split(" ")[-1])
-        t = lines[4].split(" ")
-        t = list(map(float, [t[1], t[3], t[5], t[7], t[9]]))
-        sl = float(lines[6].split(" ")[-1])
-        return Signal(coin, entry, sl, t, fraction=0.04, wait_entry=True)
+        if "Close " in text:
+            if text == "Close all trades":
+                raise CloseTradeException(cls.__name__)
+            elif "/USDT" in text:
+                coin = text.split("/")[0].split("#")[-1]
+                raise CloseTradeException(cls.__name__, coin)
+
+        c, e, sl, t = [None] * 4
+        for line in text.split("\n"):
+            if "/USDT" in line:
+                other = line.split("#")[1]
+                c = other.split("/")[0]
+                try:
+                    e = float(line.split(" ")[-1])
+                except Exception:
+                    pass
+            elif "Entry Point" in line:
+                e = float(line.split(" ")[-1])
+            elif "Targets" in line:
+                t = line.split(" ")
+                t = list(map(float, [t[1], t[3], t[5], t[7], t[9]]))
+            elif re.search(r"[Ss]top.*(loss)?", line):
+                try:
+                    sl = float(line.split(" ")[-1])
+                except Exception:
+                    pass
+        assert c and e and sl and t
+        return Signal(c, e, sl, t, fraction=0.04, wait_entry=True, tag=cls.__name__)
 
 
 class MVIP:
@@ -82,7 +108,7 @@ class MVIP:
         entry = float(lines[2].split(" - ")[-1])
         t = list(map(lambda l: float(l.split(" ")[-1]), lines[4:7]))
         sl = float(lines[9].split(" ")[-1])
-        return Signal(coin, entry, sl, t)
+        return Signal(coin, entry, sl, t, tag=cls.__name__)
 
 
 CHANNELS = [BFP, MVIP]

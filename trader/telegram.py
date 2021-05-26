@@ -1,14 +1,16 @@
 import logging
+import traceback
 
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message
 
 from . import FuturesTrader
+from .signal import CloseTradeException
 
 
 class TeleTrader(TelegramClient):
     def __init__(self, api_id, api_hash, session=None, state={}, loop=None):
-        self.state = state or {}
+        self.state = state
         self.trader = FuturesTrader()
         super().__init__(session, api_id, api_hash, loop=loop)
         if session is None:
@@ -33,8 +35,19 @@ class TeleTrader(TelegramClient):
             await self.disconnect()
 
     async def _handler(self, event: Message):
-        logging.info(f"New message (chat ID: {event.chat_id}):\n{event.text}")
-        signal = self.trader.get_signal(event.chat_id, event.text)
-        if not signal:
+        signal = None
+        try:
+            signal = self.trader.get_signal(event.chat_id, event.text)
+        except CloseTradeException as err:
+            await self.trader.close_trades(err.tag, err.coin)
+        except Exception as err:
+            logging.info(f"Ignoring message due to parse failure: {err}")
+
+        if signal is None:
             return
-        await self.trader.place_order(signal)
+
+        logging.info(f"Received signal {signal} from message: {event.text}")
+        try:
+            await self.trader.place_order(signal)
+        except Exception as err:
+            logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
