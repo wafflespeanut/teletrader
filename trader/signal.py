@@ -91,7 +91,7 @@ class BFP:
                 except Exception:
                     pass
         assert c and e and sl and t
-        return Signal(c, e, sl, t, fraction=0.04, wait_entry=True, tag=cls.__name__)
+        return Signal(c, e, sl, t, fraction=0.08, wait_entry=True, tag=cls.__name__)
 
 
 class MVIP:
