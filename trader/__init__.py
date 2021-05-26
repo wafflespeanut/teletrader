@@ -8,6 +8,7 @@ import time
 from binance import AsyncClient, BinanceSocketManager
 
 from .user_stream import UserStream
+from .signal import Signal, CHANNELS
 
 STREAM_RECONNECT_INTERVAL = 6 * 60 * 60
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
@@ -67,82 +68,7 @@ class OrderID:
         return i.startswith(cls.PrefixTarget)
 
 
-class Signal:
-    MIN_PRECISION = 6
-
-    def __init__(self, coin, entry, sl, targets, fraction=0.025, leverage=10, wait_entry=False):
-        self.coin = coin
-        self.entry = entry
-        self.sl = sl
-        self.targets = targets
-        self.fraction = fraction
-        self.leverage = leverage
-        self.wait_entry = wait_entry
-
-    @property
-    def is_long(self):
-        return self.sl < self.entry
-
-    @property
-    def is_short(self):
-        return not self.is_long
-
-    @property
-    def max_entry(self):
-        # 20% offset b/w entry and first target
-        return self.entry + (self.targets[0] - self.entry) * 0.2
-
-    def autocorrect(self, price):
-        self.entry *= self._factor(self.entry, price)
-        self.sl *= self._factor(self.sl, price)
-        self.targets = list(map(lambda i: i * self._factor(i, price), self.targets))
-
-    def _factor(self, sig_p, mark_p):
-        # Fix for prices which are human-readable at times when we'll find lack of some precision
-        minima = math.inf
-        factor = 1
-        for i in range(self.MIN_PRECISION + 1):
-            f = 1 / (10 ** (self.MIN_PRECISION - i))
-            dist = abs(sig_p * f - mark_p) / mark_p
-            if dist < minima:
-                minima = dist
-                factor = f
-            else:
-                break
-        return factor
-
-    def __repr__(self):
-        return (f"{self.coin} x{self.leverage} ({self.fraction * 100}%, "
-                f"e: {self.entry}, sl: {self.sl}, targets: {self.targets})")
-
-
-class BFP:
-    chan_id = -1001418856446
-
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        lines = text.split("\n")
-        assert lines[0].endswith("Signal")
-        assert lines[1].endswith("ENTRY POINT")
-        coin = lines[3].split("/")[0].split("#")[-1]
-        entry = float(lines[5].split(" ")[-1])
-        t = lines[7].split(" ")
-        t = list(map(float, [t[1], t[3], t[5], t[7], t[9]]))
-        sl = float(lines[9].split(" ")[-1])
-        return Signal(coin, entry, sl, t, fraction=0.04, wait_entry=True)
-
-
-class MVIP:
-    chan_id = -1001196181927
-
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "Leverage" in text
-
-
 class FuturesTrader:
-
-    channels = [BFP]
 
     def __init__(self):
         self.client: AsyncClient = None
@@ -178,14 +104,13 @@ class FuturesTrader:
         logging.info(f"Account balance: {self.balance} USDT")
 
     def get_signal(self, chat_id: int, text: str) -> Signal:
-        self.client.FUTURES_URL
-        for ch in self.channels:
+        for ch in CHANNELS:
             if ch.chan_id != chat_id:
                 continue
             try:
                 return ch.parse(text)
             except Exception as err:
-                logging.warning(f"Ignoring message because of error: {err}")
+                logging.info(f"Ignoring message due to parse failure: {err}")
 
     async def place_order(self, signal: Signal):
         await self._resubscribe_futures(add=signal.coin)
@@ -325,7 +250,7 @@ class FuturesTrader:
                         sl = self.state["orders"].pop(order_id)
                         parent = self.state["orders"].pop(sl["parent"])
                         for tp in parent["t_ord"]:
-                            self.state["orders"].pop(tp)
+                            self.state["orders"].pop(tp, None)  # It might not exist
                             try:
                                 resp = await self.client.futures_cancel_order(
                                     symbol=parent["sym"],
@@ -348,15 +273,23 @@ class FuturesTrader:
                     logging.warning(f"SL doesn't exist for order {parent}")
                     return
                 logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}")
-                new_price = parent["entry"]
+                new_price = parent["ent"]
             elif tp_id == targets[-1]:
                 logging.info(f"All TP orders hit. Removing parent {parent}")
                 self.state.pop(tp["parent"])
                 self.state.pop(parent["s_ord"])
+                try:
+                    resp = await self.client.futures_cancel_order(
+                        symbol=parent["sym"],
+                        origClientOrderId=parent["s_ord"],
+                    )
+                    logging.info(f"Cancelled SL order {parent['s_ord']} for parent {tp['parent']}, resp: {resp}")
+                except Exception as err:
+                    logging.error(f"Failed to cancel expired SL order for parent {tp['parent']}: {err}")
                 return
             else:
                 idx = targets.index(tp_id)
-                new_price = parent["entry"] if idx == 0 else parent["tgt"][idx - 1]
+                new_price = parent["ent"] if idx == 0 else parent["tgt"][idx - 1]
 
         await self._place_sl_order(tp["parent"], new_price)
 
