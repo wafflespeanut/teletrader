@@ -94,7 +94,6 @@ class FuturesTrader:
             self.state["orders"] = {}
         await self._watch_orders()
         await self._subscribe_futures_user()
-        await self._subscribe_futures()
         resp = await self.client.futures_exchange_info()
         for info in resp["symbols"]:
             self.symbols[info["symbol"]] = info
@@ -142,13 +141,16 @@ class FuturesTrader:
             "newClientOrderId": order_id,
         }
 
-        if signal.wait_entry:  # stop limit if we can wait for entry
-            params["type"] = OrderType.STOP
-            params["stopPrice"] = self._round_price(symbol, signal.entry)
-            params["price"] = self._round_price(symbol, signal.max_entry)
-        elif (signal.is_long and price > signal.max_entry) or (signal.is_short and price < signal.max_entry):
+        if (signal.is_long and price > signal.max_entry) or (signal.is_short and price < signal.max_entry):
             logging.warning(f"Price went too fast to place order for signal {signal}")
             return
+        if signal.wait_entry:
+            if price < signal.entry:
+                params["type"] = OrderType.STOP
+                params["stopPrice"] = self._round_price(symbol, signal.entry)
+                params["price"] = self._round_price(symbol, signal.max_entry)
+            else:
+                logging.info("Switching to market order as wait price is reached")
 
         async with self.olock:  # Lock only for interacting with orders
             try:
@@ -387,10 +389,9 @@ class FuturesTrader:
                     if redundant:
                         logging.info(f"Resetting price streams to {open_symbols}")
                         self.state["streams"] = open_symbols
-                        self.price_streamer = None
-                        await self._subscribe_futures()
-                        for sym in redundant:
-                            self.prices.pop(f"{sym}USDT", None)
+                await self._subscribe_futures(resub=redundant)
+                for sym in redundant:
+                    self.prices.pop(f"{sym}USDT", None)
 
                 now = time.time()
                 async with self.olock:
@@ -411,10 +412,10 @@ class FuturesTrader:
 
         asyncio.ensure_future(_watcher())
 
-    async def _subscribe_futures(self, coin: str = None):
+    async def _subscribe_futures(self, coin: str = None, resub=False):
         async with self.slock:
             num_streams = len(set(self.state["streams"]))
-            resub = self.price_streamer is None
+            resub = resub or (self.price_streamer is None)
             if coin is not None:
                 coin = coin.upper()
                 # We should have duplicates because it should be possible to long/short
@@ -429,7 +430,7 @@ class FuturesTrader:
                 self.price_streamer.cancel()
 
             symbols = set(self.state["streams"])
-            if not symbols:
+            if not resub or not symbols:
                 return
 
         async def _streamer():
