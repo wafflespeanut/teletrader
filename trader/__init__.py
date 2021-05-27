@@ -15,6 +15,7 @@ STREAM_RECONNECT_INTERVAL = 6 * 60 * 60
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
 ORDER_WATCH_INTERVAL = 5 * 60
 MAX_TARGETS = 5
+SIGNAL_SYMBOL_TTL = 20 * 60
 
 
 class OrderType:
@@ -78,7 +79,7 @@ class FuturesTrader:
         self.price_streamer = None
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
-        self.sig_cache = TTLCache(maxsize=10000, ttl=60)
+        self.sig_cache = TTLCache(maxsize=10000, ttl=SIGNAL_SYMBOL_TTL)
         self.balance = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
@@ -110,8 +111,9 @@ class FuturesTrader:
             return ch.parse(text)
 
     async def place_order(self, signal: Signal):
-        self.sig_cache.expire()
-        if self.sig_cache.get(str(signal)) is not None:
+        order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
+        allowed = await self._precheck_signal(order_id, signal.coin, signal.tag)
+        if not allowed:
             logging.info("Ignoring signal because it exists in cache")
             return
 
@@ -128,8 +130,6 @@ class FuturesTrader:
         symbol = f"{signal.coin}USDT"
         logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}")
         await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
-        order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
-        self.sig_cache[str(signal)] = order_id
         price = self.prices[signal.coin]
         quantity = (self.balance * signal.fraction) / (price / signal.leverage)
         signal.autocorrect(price)
@@ -456,6 +456,14 @@ class FuturesTrader:
             logging.info(f"Cancelled order {oid}: {resp}")
         except Exception as err:
             logging.error(f"Failed to cancel order {oid}: {err}")
+
+    async def _precheck_signal(self, order_id: str, coin: str, tag: str):
+        async with self.olock:
+            self.sig_cache.expire()
+            if self.sig_cache.get(f"{coin}-{tag}") is not None:
+                return False
+            self.sig_cache[f"{coin}-{tag}"] = order_id
+            return True
 
     # MARK: Rouding for min quantity and min price for symbols
 

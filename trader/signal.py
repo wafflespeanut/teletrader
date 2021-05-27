@@ -65,14 +65,14 @@ class BFP:
     @classmethod
     def parse(cls, text: str) -> Signal:
         if "Close " in text:
-            if text == "Close all trades":
+            if "Close all trades" in text:
                 raise CloseTradeException(cls.__name__)
             elif "/USDT" in text:
                 coin = text.split("/")[0].split("#")[-1]
                 raise CloseTradeException(cls.__name__, coin)
 
         c, e, sl, t = [None] * 4
-        for line in text.split("\n"):
+        for line in map(str.strip, text.split("\n")):
             if "/USDT" in line:
                 other = line.split("#")[1]
                 c = other.split("/")[0]
@@ -101,7 +101,7 @@ class MVIP:
     def parse(cls, text: str) -> Signal:
         assert "Leverage" in text
         text = text.replace("\n\n", "\n")
-        lines = text.split("\n")
+        lines = list(map(str.strip, text.split("\n")))
         assert "USDT" in lines[0]
         assert "Entry Zone" in lines[1]
         coin = lines[0].split("/")[0].split("#")[-1]
