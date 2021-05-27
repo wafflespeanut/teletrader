@@ -40,8 +40,10 @@ class TeleTrader(TelegramClient):
             signal = self.trader.get_signal(event.chat_id, event.text)
         except CloseTradeException as err:
             await self.trader.close_trades(err.tag, err.coin)
-        except Exception as err:
-            logging.info(f"Ignoring message due to parse failure: {err}")
+        except AssertionError:
+            logging.info("Ignoring message as requirements are not met")
+        except Exception:
+            logging.exception(f"Ignoring message {event.text} due to parse failure")
 
         if signal is None:
             return

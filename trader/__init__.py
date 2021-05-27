@@ -6,6 +6,7 @@ import uuid
 import time
 
 from binance import AsyncClient, BinanceSocketManager
+from cachetools import TTLCache
 
 from .user_stream import UserStream
 from .signal import Signal, CHANNELS
@@ -77,6 +78,7 @@ class FuturesTrader:
         self.price_streamer = None
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
+        self.sig_cache = TTLCache(maxsize=10000, ttl=60)
         self.balance = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
@@ -109,6 +111,11 @@ class FuturesTrader:
             return ch.parse(text)
 
     async def place_order(self, signal: Signal):
+        self.sig_cache.expire()
+        if self.sig_cache.get(str(signal)) is not None:
+            logging.info("Ignoring signal because it exists in cache")
+            return
+
         await self._subscribe_futures(signal.coin)
         for _ in range(10):
             if self.prices.get(signal.coin) is not None:
@@ -123,6 +130,7 @@ class FuturesTrader:
         logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}")
         await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
+        self.sig_cache[str(signal)] = order_id
         price = self.prices[signal.coin]
         quantity = (self.balance * signal.fraction) / (price / signal.leverage)
         signal.autocorrect(price)
@@ -267,7 +275,10 @@ class FuturesTrader:
                         logging.warning(f"Received order {order_id} but missing in state")
                         return
                 if OrderID.is_wait(order_id):
-                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id}")
+                    entry = float(info["ap"])
+                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})")
+                    async with self.olock:
+                        self.state["orders"][order_id]["ent"] = entry
                     await self._place_collection_orders(order_id)
                 elif OrderID.is_stop_loss(order_id):
                     async with self.olock:
@@ -339,17 +350,19 @@ class FuturesTrader:
         async def _watcher():
             while True:
                 open_symbols = []
-                open_orders = await self.client.futures_get_open_orders()
-                open_ids = []
-                logging.info(f"Checking {len(open_orders)} orders...")
-                for order in open_orders:
-                    oid = order["clientOrderId"]
-                    async with self.olock:
+                open_orders = {}
+                async with self.olock:
+                    resp = await self.client.futures_get_open_orders()
+                    for order in resp:
+                        open_orders[order["clientOrderId"]] = order
+                    logging.info(f"Checking {len(open_orders)} orders...")
+                    for oid, order in open_orders.items():
                         odata = self.state["orders"].get(oid)
                         if OrderID.is_stop_loss(oid) or OrderID.is_target(oid):
                             if odata is not None:
                                 parent = self.state["orders"].get(odata.get("parent"))
                                 if parent is None:
+                                    logging.info(f"Removing orphan {oid}")
                                     self.state["orders"].pop(oid)
                                     odata = None
                             if odata is None:
@@ -357,17 +370,27 @@ class FuturesTrader:
                                 continue
                         elif OrderID.is_market(oid) or OrderID.is_wait(oid):
                             open_symbols.append(order["symbol"][:-4])
-                        open_ids.append(oid)
+                    removed = []
+                    for oid, odata in self.state["orders"].items():
+                        if open_orders.get(oid) is None:
+                            if OrderID.is_market(oid) or OrderID.is_wait(oid):
+                                # Ignore if wait/market order has open SL
+                                if open_orders.get(odata["s_ord"]) is not None:
+                                    continue
+                            removed.append(oid)
+                    for oid in removed:
+                        logging.info(f"Removing outdated order {oid}")
+                        self.state["orders"].pop(oid)
 
                 async with self.slock:
                     redundant = set(self.state["streams"]).difference(open_symbols)
                     if redundant:
-                        for sym in redundant:
-                            self.prices.pop(f"{sym}USDT", None)
                         logging.info(f"Resetting price streams to {open_symbols}")
                         self.state["streams"] = open_symbols
                         self.price_streamer = None
                         await self._subscribe_futures()
+                        for sym in redundant:
+                            self.prices.pop(f"{sym}USDT", None)
 
                 now = time.time()
                 async with self.olock:

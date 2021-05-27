@@ -11,7 +11,7 @@ class CloseTradeException(Exception):
 class Signal:
     MIN_PRECISION = 6
 
-    def __init__(self, coin, entry, sl, targets, fraction=0.025, leverage=10, wait_entry=False, tag=None):
+    def __init__(self, coin, entry, sl, targets, fraction=0.03, leverage=10, wait_entry=False, tag=None):
         self.coin = coin
         self.entry = entry
         self.sl = sl
