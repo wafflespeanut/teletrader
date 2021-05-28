@@ -175,9 +175,6 @@ class FuturesTrader:
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
 
-        if not signal.wait_entry:  # Place SL and limit orders for market order
-            await self._place_collection_orders(order_id)
-
     async def close_trades(self, tag, coin=None):
         if coin is None:
             logging.info(f"Attempting to close all trades associated with channel {tag}")
@@ -276,7 +273,7 @@ class FuturesTrader:
                     if o is None:
                         logging.warning(f"Received order {order_id} but missing in state")
                         return
-                if OrderID.is_wait(order_id):
+                if OrderID.is_wait(order_id) or OrderID.is_market(order_id):
                     entry = float(info["ap"])
                     logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})")
                     async with self.olock:

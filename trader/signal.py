@@ -105,9 +105,11 @@ class MVIP:
         assert "USDT" in lines[0]
         assert "Entry Zone" in lines[1]
         coin = lines[0].split("/")[0].split("#")[-1]
-        entry = float(lines[2].split(" - ")[-1])
         t = list(map(lambda l: float(l.split(" ")[-1]), lines[4:7]))
         sl = float(lines[9].split(" ")[-1])
+        entry = float(lines[2].split(" - ")[-1])
+        if sl > entry:
+            entry = float(lines[2].split(" - ")[0])
         return Signal(coin, entry, sl, t, tag=cls.__name__)
 
 
