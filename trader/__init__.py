@@ -4,12 +4,13 @@ import json
 import logging
 import uuid
 import time
+import traceback
 
 from binance import AsyncClient, BinanceSocketManager
-from cachetools import TTLCache
 
-from .user_stream import UserStream
+from .errors import DuplicateOrderException, EntryCrossedException, PriceUnavailableException
 from .signal import Signal, CHANNELS
+from .user_stream import UserStream
 
 STREAM_RECONNECT_INTERVAL = 6 * 60 * 60
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
@@ -79,7 +80,8 @@ class FuturesTrader:
         self.price_streamer = None
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
-        self.sig_cache = TTLCache(maxsize=10000, ttl=SIGNAL_SYMBOL_TTL)
+        self.sig_cache = {}
+        self.order_queue = asyncio.Queue()
         self.balance = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
@@ -93,6 +95,7 @@ class FuturesTrader:
             self.state["streams"] = []
         if not self.state.get("orders"):
             self.state["orders"] = {}
+        await self._gather_orders()
         await self._watch_orders()
         await self._subscribe_futures_user()
         resp = await self.client.futures_exchange_info()
@@ -110,12 +113,67 @@ class FuturesTrader:
                 continue
             return ch.parse(text)
 
-    async def place_order(self, signal: Signal):
+    async def queue_signal(self, signal: Signal):
+        await self.order_queue.put(signal)
+
+    async def close_trades(self, tag, coin=None):
+        if coin is None:
+            logging.info(f"Attempting to close all trades associated with channel {tag}")
+        else:
+            logging.info(f"Attempting to close {coin} trades associated with channel {tag}")
+        async with self.olock:
+            removed = []
+            for order_id, order in self.state["orders"].values():
+                if order.get("tag") != tag:
+                    continue
+                if coin is not None and order["sym"] != f"{coin}USDT":
+                    continue
+                children = [] + order["t_ord"]
+                if order.get("s_ord"):
+                    children.append(order["s_ord"])
+                removed += children
+                for oid in children:
+                    await self._cancel_order(oid, order["sym"])
+                try:
+                    resp = await self.client.futures_create_order(
+                        symbol=order["sym"],
+                        side="SELL" if order["side"] == "BUY" else "BUY",
+                        type=OrderType.MARKET,
+                        closePosition=True,
+                    )
+                    logging.info(f"Closed position for {order}, resp: {resp}")
+                except Exception as err:
+                    logging.error(f"Failed to close position for {order_id}, err: {err}")
+            for oid in removed:
+                self.state["orders"].pop(oid, None)
+
+    async def _gather_orders(self):
+        async def _gatherer():
+            logging.info("Waiting for orders to be queued...")
+            while True:
+                signal = await self.order_queue.get()
+                for _ in range(3):
+                    try:
+                        await self._place_order(signal)
+                        break
+                    except DuplicateOrderException:
+                        logging.info("Ignoring signal because order exists for symbol")
+                        break
+                    except PriceUnavailableException:
+                        logging.info(f"Price unavailable for {signal.coin}. Retrying...")
+                    except EntryCrossedException as err:
+                        logging.info(f"Price went too fast ({err.price}) for signal {signal}. Retrying...")
+                    except Exception as err:
+                        logging.error(f"Failed to place order: {traceback.format_exc()} {err}. Retrying...")
+                    await asyncio.sleep(5)
+
+        asyncio.ensure_future(_gatherer())
+
+    async def _place_order(self, signal: Signal):
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
-        allowed = await self._precheck_signal(order_id, signal.coin, signal.tag)
+        allowed = await self._order_exists_for_signal(signal.coin)
         if not allowed:
-            logging.info("Ignoring signal because it exists in cache")
-            return
+            raise DuplicateOrderException()
 
         await self._subscribe_futures(signal.coin)
         for _ in range(10):
@@ -124,8 +182,7 @@ class FuturesTrader:
             logging.info(f"Waiting for {signal.coin} price to be available")
             await asyncio.sleep(1)
         if self.prices.get(signal.coin) is None:
-            logging.warning(f"Ignoring signal {signal} because price is unavailable")
-            return
+            raise PriceUnavailableException()
 
         symbol = f"{signal.coin}USDT"
         logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}")
@@ -142,15 +199,15 @@ class FuturesTrader:
         }
 
         if (signal.is_long and price > signal.max_entry) or (signal.is_short and price < signal.max_entry):
-            logging.warning(f"Price went too fast to place order for signal {signal}")
-            return
+            raise EntryCrossedException(price)
+
         if signal.wait_entry:
-            if price < signal.entry:
+            if (signal.is_long and price < signal.entry) or (signal.is_short and price > signal.entry):
                 params["type"] = OrderType.STOP
                 params["stopPrice"] = self._round_price(symbol, signal.entry)
                 params["price"] = self._round_price(symbol, signal.max_entry)
             else:
-                logging.info("Switching to market order as wait price is reached")
+                logging.info(f"Switching to market order for {signal.coin} as wait price has reached")
 
         async with self.olock:  # Lock only for interacting with orders
             try:
@@ -174,35 +231,6 @@ class FuturesTrader:
             except Exception as err:
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
-
-    async def close_trades(self, tag, coin=None):
-        if coin is None:
-            logging.info(f"Attempting to close all trades associated with channel {tag}")
-        else:
-            logging.info(f"Attempting to close {coin} trades associated with channel {tag}")
-        async with self.olock:
-            removed = []
-            for order_id, order in self.state["orders"].values():
-                if order.get("tag") != tag:
-                    continue
-                if coin is not None and order["sym"] != f"{coin}USDT":
-                    continue
-                children = [order["s_ord"]] + order["t_ord"]
-                removed += children
-                for oid in children:
-                    await self._cancel_order(oid, order["sym"])
-                try:
-                    resp = await self.client.futures_create_order(
-                        symbol=order["sym"],
-                        side="SELL" if order["side"] == "BUY" else "BUY",
-                        type=OrderType.MARKET,
-                        closePosition=True,
-                    )
-                    logging.info(f"Closed position for {order}, resp: {resp}")
-                except Exception as err:
-                    logging.error(f"Failed to close position for {order_id}, err: {err}")
-            for oid in removed:
-                self.state["orders"].pop(oid, None)
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
@@ -374,7 +402,7 @@ class FuturesTrader:
                         if open_orders.get(oid) is None:
                             if OrderID.is_market(oid) or OrderID.is_wait(oid):
                                 # Ignore if wait/market order has open SL
-                                if open_orders.get(odata["s_ord"]) is not None:
+                                if odata.get("s_ord") and open_orders.get(odata["s_ord"]) is not None:
                                     continue
                             removed.append(oid)
                     for oid in removed:
@@ -454,12 +482,16 @@ class FuturesTrader:
         except Exception as err:
             logging.error(f"Failed to cancel order {oid}: {err}")
 
-    async def _precheck_signal(self, order_id: str, coin: str, tag: str):
+    async def _order_exists_for_signal(self, coin: str):
         async with self.olock:
-            self.sig_cache.expire()
-            if self.sig_cache.get(f"{coin}-{tag}") is not None:
-                return False
-            self.sig_cache[f"{coin}-{tag}"] = order_id
+            for oid, odata in self.state["orders"].items():
+                # Check whether a matching order exists and is live
+                if odata.get("sym") != f"{coin}USDT":
+                    continue
+                if OrderID.is_market(oid):
+                    return True
+                elif OrderID.is_wait(oid) and odata.get("s_ord") is not None:
+                    return True
             return True
 
     # MARK: Rouding for min quantity and min price for symbols

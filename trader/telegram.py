@@ -1,11 +1,10 @@
 import logging
-import traceback
 
 from telethon import TelegramClient, events
 from telethon.tl.custom import Message
 
 from . import FuturesTrader
-from .signal import CloseTradeException
+from .errors import CloseTradeException
 
 
 class TeleTrader(TelegramClient):
@@ -49,7 +48,4 @@ class TeleTrader(TelegramClient):
             return
 
         logging.info(f"Received signal {signal} from message: {event.text}")
-        try:
-            await self.trader.place_order(signal)
-        except Exception as err:
-            logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
+        await self.trader.queue_signal(signal)

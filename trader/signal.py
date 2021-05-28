@@ -1,11 +1,7 @@
 import math
 import re
 
-
-class CloseTradeException(Exception):
-    def __init__(self, tag, coin=None):
-        self.tag = tag
-        self.coin = coin
+from .errors import CloseTradeException
 
 
 class Signal:

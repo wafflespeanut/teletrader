@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 
 from trader.telegram import TeleTrader
 
@@ -25,11 +26,18 @@ if STATE_PATH is not None and os.path.exists(STATE_PATH):
 async def main():
     client = TeleTrader(API_ID, API_HASH, session=SESSION_PATH, state=state, loop=loop)
     await client.init(API_KEY, API_SECRET)
-    await client.run()
+    try:
+        await client.run()
+    except asyncio.CancelledError:
+        pass
 
 try:
-    loop.run_until_complete(main())
+    task = asyncio.ensure_future(main())
+    loop.add_signal_handler(signal.SIGINT, task.cancel)
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    loop.run_until_complete(task)
 finally:
+    loop.close()
     if STATE_PATH is not None:
         with open(STATE_PATH, "w") as fd:
             json.dump(state, fd, indent=2)
