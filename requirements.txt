@@ -2,3 +2,4 @@ Telethon==1.21.1
 janus==0.5.0
 python-binance==1.0.10
 unicorn-binance-websocket-api==1.30.0
+cachetools==4.2.2

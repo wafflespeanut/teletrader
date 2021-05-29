@@ -60,13 +60,6 @@ class BFP:
 
     @classmethod
     def parse(cls, text: str) -> Signal:
-        if "Close " in text:
-            if "Close all trades" in text:
-                raise CloseTradeException(cls.__name__)
-            elif "/USDT" in text:
-                coin = text.split("/")[0].split("#")[-1]
-                raise CloseTradeException(cls.__name__, coin)
-
         c, e, sl, t = [None] * 4
         for line in map(str.strip, text.split("\n")):
             if "/USDT" in line:
@@ -95,18 +88,26 @@ class MVIP:
 
     @classmethod
     def parse(cls, text: str) -> Signal:
+        if "Close " in text:
+            if "/USDT" in text:
+                coin = text.split("/")[0].split("#")[-1]
+                raise CloseTradeException(cls.__name__, coin)
+            raise CloseTradeException(cls.__name__)
+
         assert "Leverage" in text
         text = text.replace("\n\n", "\n")
         lines = list(map(str.strip, text.split("\n")))
         assert "USDT" in lines[0]
         assert "Entry Zone" in lines[1]
         coin = lines[0].split("/")[0].split("#")[-1]
-        t = list(map(lambda l: float(l.split(" ")[-1]), lines[4:7]))
-        sl = float(lines[9].split(" ")[-1])
-        entry = float(lines[2].split(" - ")[-1])
+        t = list(map(lambda l: float(l.replace(",", "").split(" ")[-1]), lines[4:7]))
+        sl = float(lines[9].replace(",", "").split(" ")[-1])
+        entry_range = lines[2].replace(",", "").split(" - ")
+        lev = int(lines[7].split("×")[-1])
+        entry = float(entry_range[-1])
         if sl > entry:
-            entry = float(lines[2].split(" - ")[0])
-        return Signal(coin, entry, sl, t, tag=cls.__name__)
+            entry = float(entry_range[0])
+        return Signal(coin, entry, sl, t, leverage=lev, tag=cls.__name__)
 
 
 CHANNELS = [BFP, MVIP]

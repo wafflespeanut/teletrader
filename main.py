@@ -37,7 +37,6 @@ try:
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     loop.run_until_complete(task)
 finally:
-    loop.close()
     if STATE_PATH is not None:
         with open(STATE_PATH, "w") as fd:
             json.dump(state, fd, indent=2)
