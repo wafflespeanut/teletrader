@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 
+from trader.logger import DEFAULT_LOGGER
 from trader.telegram import TeleTrader
 
 API_ID = int(os.getenv("API_ID"))
@@ -14,7 +15,7 @@ SESSION_PATH = os.getenv("SESSION_PATH")
 STATE_PATH = os.getenv("STATE_PATH")
 
 # fine to use this logger in async - not looking for performance
-logging.getLogger().setLevel(logging.INFO)
+DEFAULT_LOGGER.setLevel(logging.INFO)
 loop = asyncio.get_event_loop()
 
 state = {}

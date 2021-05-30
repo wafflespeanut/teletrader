@@ -1,11 +1,12 @@
 import json
-import logging
 import threading
 import time
 from contextlib import asynccontextmanager
 
 import janus
 from unicorn_binance_websocket_api.unicorn_binance_websocket_api_manager import BinanceWebSocketApiManager
+
+from .logger import DEFAULT_LOGGER as logging
 
 
 class UserStream:

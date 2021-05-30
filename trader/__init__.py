@@ -1,18 +1,20 @@
 import asyncio
 import math
 import json
-import logging
 import uuid
 import time
 import traceback
 
 from binance import AsyncClient, BinanceSocketManager
+from cachetools import TTLCache
 
 from .errors import DuplicateOrderException, EntryCrossedException, PriceUnavailableException
+from .logger import DEFAULT_LOGGER as logging
 from .signal import Signal, CHANNELS
 from .user_stream import UserStream
 
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
+NEW_ORDER_TIMEOUT = 5 * 60
 ORDER_WATCH_INTERVAL = 5 * 60
 MAX_TARGETS = 5
 SIGNAL_SYMBOL_TTL = 20 * 60
@@ -85,8 +87,8 @@ class FuturesTrader:
         self.price_streamer = None
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
-        self.sig_cache = {}
         self.order_queue = asyncio.Queue()
+        self.sig_cache = TTLCache(maxsize=100, ttl=20)
         self.balance = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
@@ -109,7 +111,7 @@ class FuturesTrader:
         for item in resp:
             if item["asset"] == "USDT":
                 self.balance = float(item["balance"])
-        logging.info(f"Account balance: {self.balance} USDT")
+        logging.info(f"Account balance: {self.balance} USDT", on="blue")
 
     def get_signal(self, chat_id: int, text: str) -> Signal:
         for ch in CHANNELS:
@@ -122,9 +124,9 @@ class FuturesTrader:
 
     async def close_trades(self, tag, coin=None):
         if coin is None:
-            logging.info(f"Attempting to close all trades associated with channel {tag}")
+            logging.info(f"Attempting to close all trades associated with channel {tag}", on="yellow")
         else:
-            logging.info(f"Attempting to close {coin} trades associated with channel {tag}")
+            logging.info(f"Attempting to close {coin} trades associated with channel {tag}", on="yellow")
         async with self.olock:
             removed = []
             for order_id, order in self.state["orders"].values():
@@ -145,7 +147,7 @@ class FuturesTrader:
                         type=OrderType.MARKET,
                         closePosition=True,
                     )
-                    logging.info(f"Closed position for {order}, resp: {resp}")
+                    logging.info(f"Closed position for {order}, resp: {resp}", on="yellow")
                 except Exception as err:
                     logging.error(f"Failed to close position for {order_id}, err: {err}")
             for oid in removed:
@@ -161,21 +163,21 @@ class FuturesTrader:
                         await self._place_order(signal)
                         break
                     except DuplicateOrderException:
-                        logging.info("Ignoring signal because order exists for symbol")
+                        logging.info("Ignoring signal because order exists for symbol", on="yellow")
                         break
                     except PriceUnavailableException:
-                        logging.info(f"Price unavailable for {signal.coin}. Retrying...")
+                        logging.info(f"Price unavailable for {signal.coin}", on="yellow")
                     except EntryCrossedException as err:
-                        logging.info(f"Price went too fast ({err.price}) for signal {signal}. Retrying...")
+                        logging.info(f"Price went too fast ({err.price}) for signal {signal}", on="yellow")
                     except Exception as err:
-                        logging.error(f"Failed to place order: {traceback.format_exc()} {err}. Retrying...")
+                        logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
                     await asyncio.sleep(5)
 
         asyncio.ensure_future(_gatherer())
 
     async def _place_order(self, signal: Signal):
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
-        exists = await self._order_exists_for_signal(signal.coin)
+        exists = await self._order_exists_for_signal(signal)
         if exists:
             raise DuplicateOrderException()
 
@@ -189,7 +191,7 @@ class FuturesTrader:
             raise PriceUnavailableException()
 
         symbol = f"{signal.coin}USDT"
-        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}")
+        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
         await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
         price = self.prices[signal.coin]
         quantity = (self.balance * signal.fraction) / (price / signal.leverage)
@@ -227,7 +229,7 @@ class FuturesTrader:
                     "frc": signal.fraction,
                     "lev": signal.leverage,
                     "tag": signal.tag,
-                    "exp": int(time.time()) + WAIT_ORDER_EXPIRY,  # 1 day expiry by default
+                    "crt": int(time.time()),
                     "t_ord": [],
                 }
                 logging.info(f"Created order {order_id} for signal: {signal}, "
@@ -248,7 +250,7 @@ class FuturesTrader:
                 logging.warning(f"TP order(s) already exist for parent {order_id}")
                 return
 
-        quantity = odata["qty"]
+        remaining = quantity = odata["qty"]
         for i, tgt in enumerate(targets):
             quantity *= 0.5
             async with self.olock:
@@ -261,12 +263,14 @@ class FuturesTrader:
                 if i < len(odata["tgt"]) - 1:
                     params["type"] = OrderType.LIMIT
                     params["timeInForce"] = "GTC"
-                    params["quantity"] = self._round_qty(symbol, quantity)
+                    q = self._round_qty(symbol, quantity)
+                    params["quantity"] = q
+                    remaining -= q
                     params["price"] = self._round_price(symbol, tgt)
-                else:  # Close position with final target as TP
-                    params["type"] = OrderType.TP_MARKET
+                else:  # Don't place TP order as it'll close position (affecting other orders)
+                    params["type"] = OrderType.STOP_MARKET
                     params["stopPrice"] = self._round_price(symbol, tgt)
-                    params["closePosition"] = True
+                    params["quantity"] = remaining
                 try:
                     resp = await self.client.futures_create_order(**params)
                     odata["t_ord"].append(tgt_order_id)
@@ -302,7 +306,7 @@ class FuturesTrader:
             for info in msg["a"]["B"]:
                 if info["a"] == "USDT":
                     self.balance = float(info["cw"])
-                    logging.info(f"Current balance: {self.balance}")
+                    logging.info(f"Account balance: {self.balance} USDT", on="blue")
         elif msg["e"] == UserEventType.OrderTradeUpdate:
             info = msg["o"]
             order_id = info["c"]
@@ -315,20 +319,20 @@ class FuturesTrader:
                         return
                 if OrderID.is_wait(order_id) or OrderID.is_market(order_id):
                     entry = float(info["ap"])
-                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})")
+                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})", on="green")
                     async with self.olock:
                         self.state["orders"][order_id]["ent"] = entry
                     await self._place_collection_orders(order_id)
                 elif OrderID.is_stop_loss(order_id):
                     async with self.olock:
-                        logging.info(f"Order {order_id} hit stop loss. Removing TP orders...")
+                        logging.info(f"Order {order_id} hit stop loss. Removing TP orders...", on="red")
                         sl = self.state["orders"].pop(order_id)
                         parent = self.state["orders"].pop(sl["parent"])
                         for oid in parent["t_ord"]:
                             self.state["orders"].pop(oid, None)  # It might not exist
                             await self._cancel_order(oid, parent["sym"])
                 elif OrderID.is_target(order_id):
-                    logging.info(f"TP order {order_id} hit.")
+                    logging.info(f"TP order {order_id} hit.", color="green")
                     await self._move_stop_loss(order_id)
 
     async def _move_stop_loss(self, tp_id: str):
@@ -343,7 +347,7 @@ class FuturesTrader:
                 logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}")
                 new_price = parent["ent"]
             elif tp_id == targets[-1]:
-                logging.info(f"All TP orders hit. Removing parent {parent}")
+                logging.info(f"All TP orders hit. Removing parent {parent}", on="green")
                 parent = self.state.pop(tp["parent"])
                 self.state.pop(parent["s_ord"])
                 await self._cancel_order(parent["s_ord"], parent["sym"])
@@ -372,7 +376,7 @@ class FuturesTrader:
                 "type": OrderType.STOP_MARKET,
                 "newClientOrderId": sl_order_id,
                 "stopPrice": self._round_price(symbol, new_price if new_price is not None else odata["sl"]),
-                "closePosition": True,
+                "quantity": odata["qty"],
             }
             try:
                 resp = await self.client.futures_create_order(**params)
@@ -402,7 +406,7 @@ class FuturesTrader:
                             if odata is not None:
                                 parent = self.state["orders"].get(odata.get("parent"))
                                 if parent is None:
-                                    logging.info(f"Removing orphan {oid}")
+                                    logging.info(f"Removing orphan {oid}", color="yellow")
                                     self.state["orders"].pop(oid)
                                     odata = None
                             if odata is None:
@@ -414,16 +418,21 @@ class FuturesTrader:
                     for oid, odata in self.state["orders"].items():
                         if open_orders.get(oid) is None:
                             if OrderID.is_market(oid) or OrderID.is_wait(oid):
-                                continue
+                                # Remove parent if it's old and none of the child orders exist
+                                if (time.time() - odata["crt"]) < NEW_ORDER_TIMEOUT:
+                                    continue
+                                cids = ([odata["s_ord"]] if odata.get("s_ord") else []) + odata["t_ord"]
+                                if not all(open_orders.get(i) is None for i in cids):
+                                    continue
                             removed.append(oid)
                     for oid in removed:
-                        logging.info(f"Removing outdated order {oid}")
+                        logging.warning(f"Removing outdated order {oid}", color="yellow")
                         self.state["orders"].pop(oid)
 
                 async with self.slock:
                     redundant = set(self.state["streams"]).difference(open_symbols)
                     if redundant:
-                        logging.info(f"Resetting price streams to {open_symbols}")
+                        logging.warning(f"Resetting price streams to {open_symbols}", color="yellow")
                         self.state["streams"] = open_symbols
                 await self._subscribe_futures(resub=redundant)
                 for sym in redundant:
@@ -437,9 +446,9 @@ class FuturesTrader:
                             continue
                         if order.get("t_ord"):
                             continue
-                        if now < order["exp"]:
+                        if now < (order["crt"] + WAIT_ORDER_EXPIRY):
                             continue
-                        logging.info(f"Wait order {order_id} has expired. Removing...")
+                        logging.warning(f"Wait order {order_id} has expired. Removing...", on="yellow")
                         removed.append(order_id)
                         await self._cancel_order(order_id, order["sym"])
                     for order_id in removed:
@@ -471,12 +480,12 @@ class FuturesTrader:
 
         async def _streamer():
             subs = list(map(lambda s: s.lower() + "usdt@aggTrade", symbols))
-            logging.info(f"Spawning listener for {len(symbols)} symbol(s): {symbols}")
+            logging.info(f"Spawning listener for {len(symbols)} symbol(s): {symbols}", color="magenta")
             async with self.manager.futures_multiplex_socket(subs) as stream:
                 while True:
                     msg = await stream.recv()
                     if msg is None:
-                        logging.warning("Received 'null' in price stream")
+                        logging.warning("Received 'null' in price stream", color="red")
                         continue
                     try:
                         symbol = msg["stream"].split("@")[0][:-4].upper()
@@ -493,16 +502,22 @@ class FuturesTrader:
         except Exception as err:
             logging.error(f"Failed to cancel order {oid}: {err}")
 
-    async def _order_exists_for_signal(self, coin: str):
+    async def _order_exists_for_signal(self, signal: Signal):
         async with self.olock:
-            for oid, odata in self.state["orders"].items():
+            self.sig_cache.expire()
+            # Same provider can't give signal for same symbol within 20 seconds
+            key = f"{signal.coin}_{signal.tag}"
+            if self.sig_cache.get(key) is not None:
+                return True
+            for odata in self.state["orders"].values():
                 # Check whether a matching order exists and is live
-                if odata.get("sym") != f"{coin}USDT":
+                if odata.get("sym") != f"{signal.coin}USDT" or odata.get("parent") is not None:
                     continue
-                if OrderID.is_market(oid):
+                is_buy = odata["sl"] < odata["ent"]
+                if (signal.is_short and is_buy) or (signal.is_long and not is_buy):
+                    logging.warning(f"Ignoring discrepant signal for {signal.coin}", on="red")
                     return True
-                elif OrderID.is_wait(oid) and odata.get("s_ord") is not None:
-                    return True
+            self.sig_cache[key] = ()
             return False
 
     # MARK: Rouding for min quantity and min price for symbols

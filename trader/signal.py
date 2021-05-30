@@ -90,16 +90,20 @@ class MVIP:
     def parse(cls, text: str) -> Signal:
         if "Close " in text:
             if "/USDT" in text:
-                coin = text.split("/")[0].split("#")[-1]
+                coin = text.split("/")[0].split(" ")[-1]
+                if coin.startswith("#"):
+                    coin = coin.replace("#", "")
                 raise CloseTradeException(cls.__name__, coin)
             raise CloseTradeException(cls.__name__)
 
         assert "Leverage" in text
-        text = text.replace("\n\n", "\n")
+        text = text.replace("\n\n", "\n").replace("\n\n", "\n")
         lines = list(map(str.strip, text.split("\n")))
         assert "USDT" in lines[0]
         assert "Entry Zone" in lines[1]
-        coin = lines[0].split("/")[0].split("#")[-1]
+        coin = lines[0].split("/")[0].split(" ")[-1]
+        if coin.startswith("#"):
+            coin = coin.replace("#", "")
         t = list(map(lambda l: float(l.replace(",", "").split(" ")[-1]), lines[4:7]))
         sl = float(lines[9].replace(",", "").split(" ")[-1])
         entry_range = lines[2].replace(",", "").split(" - ")
