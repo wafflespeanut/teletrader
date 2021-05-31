@@ -106,11 +106,12 @@ class MVIP:
             coin = coin.replace("#", "")
         t = list(map(lambda l: float(l.replace(",", "").split(" ")[-1]), lines[4:7]))
         sl = float(lines[9].replace(",", "").split(" ")[-1])
-        entry_range = lines[2].replace(",", "").split(" - ")
-        lev = int(lines[7].split("×")[-1])
-        entry = float(entry_range[-1])
+        entry_range = lines[2].replace(",", "").split("-")
+        m = re.search(r'(?i)leverage.+?([0-9]+)', lines[7])
+        lev = int(m[1])
+        entry = float(entry_range[-1].strip())
         if sl > entry:
-            entry = float(entry_range[0])
+            entry = float(entry_range[0].strip())
         return Signal(coin, entry, sl, t, leverage=lev, tag=cls.__name__)
 
 

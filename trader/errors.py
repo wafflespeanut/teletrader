@@ -1,8 +1,4 @@
 
-class DuplicateOrderException(Exception):
-    pass
-
-
 class PriceUnavailableException(Exception):
     pass
 

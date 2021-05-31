@@ -2,13 +2,15 @@ import asyncio
 import math
 import json
 import uuid
+import re
 import time
 import traceback
 
 from binance import AsyncClient, BinanceSocketManager
+from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache
 
-from .errors import DuplicateOrderException, EntryCrossedException, PriceUnavailableException
+from .errors import EntryCrossedException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
 from .signal import Signal, CHANNELS
 from .user_stream import UserStream
@@ -158,12 +160,18 @@ class FuturesTrader:
             logging.info("Waiting for orders to be queued...")
             while True:
                 signal = await self.order_queue.get()
-                for _ in range(3):
+                if not re.search(r"^[A-Z0-9]+$", signal.coin):
+                    logging.info(f"Unknown symbol {signal.coin} in signal", on="yellow")
+                    continue
+                for i in range(3):
+                    if i > 0:
+                        await self._unregister_order(signal)
                     try:
-                        await self._place_order(signal)
-                        break
-                    except DuplicateOrderException:
-                        logging.info("Ignoring signal because order exists for symbol", on="yellow")
+                        registered = await self._register_order_for_signal(signal)
+                        if registered:
+                            await self._place_order(signal)
+                        else:
+                            logging.info("Ignoring signal because order exists for symbol", on="yellow")
                         break
                     except PriceUnavailableException:
                         logging.info(f"Price unavailable for {signal.coin}", on="yellow")
@@ -171,16 +179,14 @@ class FuturesTrader:
                         logging.info(f"Price went too fast ({err.price}) for signal {signal}", on="yellow")
                     except Exception as err:
                         logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
+                        await self._unregister_order(signal)  # unknown error - don't block symbols from future signals
+                        break
                     await asyncio.sleep(5)
 
         asyncio.ensure_future(_gatherer())
 
     async def _place_order(self, signal: Signal):
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
-        exists = await self._order_exists_for_signal(signal)
-        if exists:
-            raise DuplicateOrderException()
-
         await self._subscribe_futures(signal.coin)
         for _ in range(10):
             if self.prices.get(signal.coin) is not None:
@@ -231,10 +237,13 @@ class FuturesTrader:
                     "tag": signal.tag,
                     "crt": int(time.time()),
                     "t_ord": [],
+                    "t_q": [],
                 }
                 logging.info(f"Created order {order_id} for signal: {signal}, "
                              f"params: {json.dumps(params)}, resp: {resp}")
             except Exception as err:
+                if isinstance(err, BinanceAPIException) and err.code == -2021:
+                    raise EntryCrossedException(self.prices[signal.coin])
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
 
@@ -257,24 +266,22 @@ class FuturesTrader:
                 tgt_order_id = OrderID.target()
                 params = {
                     "symbol": symbol,
+                    "type": OrderType.LIMIT,
+                    "timeInForce": "GTC",
                     "side": "SELL" if odata["side"] == "BUY" else "BUY",
                     "newClientOrderId": tgt_order_id,
+                    "price": self._round_price(symbol, tgt),
                 }
                 if i < len(odata["tgt"]) - 1:
-                    params["type"] = OrderType.LIMIT
-                    params["timeInForce"] = "GTC"
-                    q = self._round_qty(symbol, quantity)
-                    params["quantity"] = q
-                    remaining -= q
-                    params["price"] = self._round_price(symbol, tgt)
-                else:  # Don't place TP order as it'll close position (affecting other orders)
-                    params["type"] = OrderType.STOP_MARKET
-                    params["stopPrice"] = self._round_price(symbol, tgt)
-                    params["quantity"] = remaining
+                    params["quantity"] = self._round_qty(symbol, quantity)
+                else:  # Don't close position (as it'll affect other orders)
+                    params["quantity"] = self._round_qty(symbol, remaining)
                 try:
                     resp = await self.client.futures_create_order(**params)
                     odata["t_ord"].append(tgt_order_id)
+                    odata["t_q"].append(params["quantity"])
                     self.state["orders"][tgt_order_id] = {"parent": order_id}
+                    remaining -= params["quantity"]  # Deduct after placing successful order
                     logging.info(f"Created limit order {tgt_order_id} for parent {order_id}, "
                                  f"resp: {resp}, params: {json.dumps(params)}")
                 except Exception as err:
@@ -293,7 +300,7 @@ class FuturesTrader:
                         elif event == UserEventType.OrderTradeUpdate:
                             data = msg["o"]
                         elif event == UserEventType.AccountConfigUpdate:
-                            data = msg["ac"]
+                            data = msg.get("ac", msg.get("ai"))
                         logging.info(f"{event}: {data}")
                         await self._handle_event(msg)
                     except Exception as err:
@@ -344,30 +351,26 @@ class FuturesTrader:
                 if parent.get("s_ord") is None:
                     logging.warning(f"SL doesn't exist for order {parent}")
                     return
-                logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}")
-                new_price = parent["ent"]
+                logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}", color="red")
+                new_price, quantity = parent["ent"], parent["qty"]
             elif tp_id == targets[-1]:
-                logging.info(f"All TP orders hit. Removing parent {parent}", on="green")
+                logging.info(f"All TP orders hit. Removing parent {parent}")
                 parent = self.state.pop(tp["parent"])
                 self.state.pop(parent["s_ord"])
                 await self._cancel_order(parent["s_ord"], parent["sym"])
                 return
-            elif tp_id == targets[0]:
-                new_price = parent["ent"]
             else:
-                return
+                idx = targets.index(tp_id)
+                new_price, quantity = parent["ent"], sum(parent["t_q"][(idx + 1):])
 
-        await self._place_sl_order(tp["parent"], new_price)
+        await self._place_sl_order(tp["parent"], new_price, quantity)
 
-    async def _place_sl_order(self, parent_id: str, new_price=None):
+    async def _place_sl_order(self, parent_id: str, new_price=None, quantity=None):
         async with self.olock:
             odata = self.state["orders"][parent_id]
             symbol = odata["sym"]
             sl_order_id = OrderID.stop_loss()
             if odata.get("s_ord") is not None:
-                if new_price is None:
-                    logging.warning(f"SL order already exists for parent {parent_id}")
-                    return
                 logging.info(f"Moving SL order for {parent_id} to new price {new_price}")
                 await self._cancel_order(odata["s_ord"], symbol)
             params = {
@@ -376,7 +379,7 @@ class FuturesTrader:
                 "type": OrderType.STOP_MARKET,
                 "newClientOrderId": sl_order_id,
                 "stopPrice": self._round_price(symbol, new_price if new_price is not None else odata["sl"]),
-                "quantity": odata["qty"],
+                "quantity": self._round_qty(symbol, (quantity if quantity is not None else odata["qty"])),
             }
             try:
                 resp = await self.client.futures_create_order(**params)
@@ -502,13 +505,13 @@ class FuturesTrader:
         except Exception as err:
             logging.error(f"Failed to cancel order {oid}: {err}")
 
-    async def _order_exists_for_signal(self, signal: Signal):
+    async def _register_order_for_signal(self, signal: Signal):
         async with self.olock:
             self.sig_cache.expire()
             # Same provider can't give signal for same symbol within 20 seconds
             key = f"{signal.coin}_{signal.tag}"
             if self.sig_cache.get(key) is not None:
-                return True
+                return False
             for odata in self.state["orders"].values():
                 # Check whether a matching order exists and is live
                 if odata.get("sym") != f"{signal.coin}USDT" or odata.get("parent") is not None:
@@ -516,9 +519,13 @@ class FuturesTrader:
                 is_buy = odata["sl"] < odata["ent"]
                 if (signal.is_short and is_buy) or (signal.is_long and not is_buy):
                     logging.warning(f"Ignoring discrepant signal for {signal.coin}", on="red")
-                    return True
+                    return False
             self.sig_cache[key] = ()
-            return False
+            return True
+
+    async def _unregister_order(self, signal: Signal):
+        async with self.olock:
+            self.sig_cache.pop(f"{signal.coin}_{signal.tag}", None)
 
     # MARK: Rouding for min quantity and min price for symbols
 
