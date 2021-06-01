@@ -131,7 +131,7 @@ class FuturesTrader:
             logging.info(f"Attempting to close {coin} trades associated with channel {tag}", on="yellow")
         async with self.olock:
             removed = []
-            for order_id, order in self.state["orders"].values():
+            for order_id, order in self.state["orders"].items():
                 if order.get("tag") != tag:
                     continue
                 if coin is not None and order["sym"] != f"{coin}USDT":
@@ -142,12 +142,16 @@ class FuturesTrader:
                 removed += children
                 for oid in children:
                     await self._cancel_order(oid, order["sym"])
+                quantity = 0
+                for tid, q in zip(order["t_ord"], order["t_q"]):
+                    if self.state["orders"].get(tid):
+                        quantity += q
                 try:
                     resp = await self.client.futures_create_order(
                         symbol=order["sym"],
                         side="SELL" if order["side"] == "BUY" else "BUY",
                         type=OrderType.MARKET,
-                        closePosition=True,
+                        quantity=self._round_qty(order["sym"], quantity),
                     )
                     logging.info(f"Closed position for {order}, resp: {resp}", on="yellow")
                 except Exception as err:
@@ -242,10 +246,10 @@ class FuturesTrader:
                 logging.info(f"Created order {order_id} for signal: {signal}, "
                              f"params: {json.dumps(params)}, resp: {resp}")
             except Exception as err:
-                if isinstance(err, BinanceAPIException) and err.code == -2021:
-                    raise EntryCrossedException(self.prices[signal.coin])
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
+                if isinstance(err, BinanceAPIException) and err.code == -2021:
+                    raise EntryCrossedException(self.prices[signal.coin])
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
@@ -381,17 +385,27 @@ class FuturesTrader:
                 "stopPrice": self._round_price(symbol, new_price if new_price is not None else odata["sl"]),
                 "quantity": self._round_qty(symbol, (quantity if quantity is not None else odata["qty"])),
             }
-            try:
-                resp = await self.client.futures_create_order(**params)
-                odata["s_ord"] = sl_order_id
-                self.state["orders"][sl_order_id] = {
-                    "parent": parent_id,
-                }
-                logging.info(f"Created SL order {sl_order_id} for parent {parent_id}, "
-                             f"resp: {resp}, params: {json.dumps(params)}")
-            except Exception as err:
-                logging.error(f"Failed to create SL order for parent {parent_id}: {err}, "
-                              f"params: {json.dumps(params)}")
+            for i in range(4):
+                try:
+                    resp = await self.client.futures_create_order(**params)
+                    odata["s_ord"] = sl_order_id
+                    self.state["orders"][sl_order_id] = {
+                        "parent": parent_id,
+                    }
+                    logging.info(f"Created SL order {sl_order_id} for parent {parent_id}, "
+                                 f"resp: {resp}, params: {json.dumps(params)}")
+                except Exception as err:
+                    logging.error(f"Failed to create SL order for parent {parent_id}: {err}, "
+                                  f"params: {json.dumps(params)}")
+                    if isinstance(err, BinanceAPIException) and err.code == -2021:  # price is around SL now
+                        if i < 3:  # Attempt thrice before giving up
+                            await asyncio.sleep(3)
+                        else:
+                            logging.info(f"Placing market order for parent {parent_id} "
+                                         "after multiple attempts to create SL order", color="yellow")
+                            params["type"] = OrderType.MARKET
+                        continue
+                break
 
     async def _watch_orders(self):
         async def _watcher():

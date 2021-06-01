@@ -83,6 +83,30 @@ class BFP:
         return Signal(c, e, sl, t, fraction=0.05, leverage=20, wait_entry=True, tag=cls.__name__)
 
 
+class BPS:
+    chan_id = -1001397582022
+
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        pass
+
+
+class TCA:
+    chan_id = -1001239897393
+
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        pass
+
+
+class MCVIP:
+    chan_id = -1001330855662
+
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        pass
+
+
 class MVIP:
     chan_id = -1001196181927
 
@@ -96,23 +120,29 @@ class MVIP:
                 raise CloseTradeException(cls.__name__, coin)
             raise CloseTradeException(cls.__name__)
 
-        assert "Leverage" in text
+        assert "rage" in text
         text = text.replace("\n\n", "\n").replace("\n\n", "\n")
+        c, er, sl, lv, t = [None] * 5
         lines = list(map(str.strip, text.split("\n")))
-        assert "USDT" in lines[0]
-        assert "Entry Zone" in lines[1]
-        coin = lines[0].split("/")[0].split(" ")[-1]
-        if coin.startswith("#"):
-            coin = coin.replace("#", "")
-        t = list(map(lambda l: float(l.replace(",", "").split(" ")[-1]), lines[4:7]))
-        sl = float(lines[9].replace(",", "").split(" ")[-1])
-        entry_range = lines[2].replace(",", "").split("-")
-        m = re.search(r'(?i)leverage.+?([0-9]+)', lines[7])
-        lev = int(m[1])
-        entry = float(entry_range[-1].strip())
-        if sl > entry:
-            entry = float(entry_range[0].strip())
-        return Signal(coin, entry, sl, t, leverage=lev, tag=cls.__name__)
+        for i, line in enumerate(lines):
+            if "/USDT" in line:
+                c = line.split("/")[0].split(" ")[-1]
+                if c.startswith("#"):
+                    c = c.replace("#", "")
+            if "Entry" in line:
+                er = lines[i + 1].replace(",", "").split("-")
+            if "Take-Profit" in line:
+                t = list(map(lambda l: float(l.replace(",", "").split(" ")[-1]), lines[(i + 1):(i + 4)]))
+            if "rage" in line:
+                m = re.search(r'(?i)lev.?rage.+?([0-9]+)', lines[i])
+                lv = int(m[1])
+            if "Stop" in line:
+                sl = float(lines[i + 1].replace(",", "").split(" ")[-1])
+        assert c and er and sl and lv and t
+        e = float(er[-1].strip())
+        if sl > e:
+            e = float(er[0].strip())
+        return Signal(c, e, sl, t, leverage=lv, tag=cls.__name__)
 
 
 CHANNELS = [BFP, MVIP]
