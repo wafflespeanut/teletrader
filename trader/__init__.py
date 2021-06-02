@@ -190,7 +190,6 @@ class FuturesTrader:
         asyncio.ensure_future(_gatherer())
 
     async def _place_order(self, signal: Signal):
-        order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
         await self._subscribe_futures(signal.coin)
         for _ in range(10):
             if self.prices.get(signal.coin) is not None:
@@ -205,7 +204,10 @@ class FuturesTrader:
         await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
         price = self.prices[signal.coin]
         quantity = (self.balance * signal.fraction) / (price / signal.leverage)
-        signal.autocorrect(price)
+        signal.correct(price)
+        logging.info(f"Corrected signal: {signal}", color="cyan")
+
+        order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
         params = {
             "symbol": symbol,
             "side": "BUY" if signal.is_long else "SELL",
@@ -218,12 +220,12 @@ class FuturesTrader:
             raise EntryCrossedException(price)
 
         if signal.wait_entry:
-            if (signal.is_long and price < signal.entry) or (signal.is_short and price > signal.entry):
-                params["type"] = OrderType.STOP
-                params["stopPrice"] = self._round_price(symbol, signal.entry)
-                params["price"] = self._round_price(symbol, signal.max_entry)
-            else:
-                logging.info(f"Switching to market order for {signal.coin} as wait price has reached")
+            logging.info(f"Placing stop limit order for {signal.coin} (price @ {price}, entry @ {signal.entry})")
+            params["type"] = OrderType.STOP
+            params["stopPrice"] = self._round_price(symbol, signal.entry)
+            params["price"] = self._round_price(symbol, signal.max_entry)
+        else:
+            logging.info(f"Placing market order for {signal.coin} (price @ {price}, entry @ {signal.entry}")
 
         async with self.olock:  # Lock only for interacting with orders
             try:
@@ -233,7 +235,7 @@ class FuturesTrader:
                     "qty": float(resp["origQty"]),
                     "sym": symbol,
                     "side": params["side"],
-                    "ent": signal.entry,
+                    "ent": signal.entry if signal.wait_entry else price,
                     "sl": signal.sl,
                     "tgt": signal.targets,
                     "frc": signal.fraction,
@@ -249,7 +251,7 @@ class FuturesTrader:
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
                 if isinstance(err, BinanceAPIException) and err.code == -2021:
-                    raise EntryCrossedException(self.prices[signal.coin])
+                    raise EntryCrossedException(price)
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
@@ -399,6 +401,7 @@ class FuturesTrader:
                                   f"params: {json.dumps(params)}")
                     if isinstance(err, BinanceAPIException) and err.code == -2021:  # price is around SL now
                         if i < 3:  # Attempt thrice before giving up
+                            logging.info(f"Waiting to place limit SL order for parent {parent_id}")
                             await asyncio.sleep(3)
                         else:
                             logging.info(f"Placing market order for parent {parent_id} "
@@ -528,11 +531,13 @@ class FuturesTrader:
                 return False
             for odata in self.state["orders"].values():
                 # Check whether a matching order exists and is live
-                if odata.get("sym") != f"{signal.coin}USDT" or odata.get("parent") is not None:
+                if odata.get("sym") != f"{signal.coin}USDT":
+                    continue
+                if odata.get("parent") is not None or odata.get("s_ord") is None:
                     continue
                 is_buy = odata["sl"] < odata["ent"]
                 if (signal.is_short and is_buy) or (signal.is_long and not is_buy):
-                    logging.warning(f"Ignoring discrepant signal for {signal.coin}", on="red")
+                    logging.warning(f"Ignoring discrepant signal for {signal.coin}", color="red")
                     return False
             self.sig_cache[key] = ()
             return True
