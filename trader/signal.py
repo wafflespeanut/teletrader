@@ -153,7 +153,7 @@ class FWP:
         c, er, sl = [None] * 3
         for line in map(str.strip, text.split("\n")):
             if "USDT" in line:
-                c = line.replace("/", "").replace("#", "").replace("USDT", "")
+                c = line.split(" ")[0].replace("/", "").replace("#", "").replace("USDT", "")
             if "BUY" in line and not er:
                 er = line.split(":")[-1].replace("$", "").split("-")
             if "TARGET " in line:

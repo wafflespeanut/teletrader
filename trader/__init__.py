@@ -126,9 +126,9 @@ class FuturesTrader:
 
     async def close_trades(self, tag, coin=None):
         if coin is None:
-            logging.info(f"Attempting to close all trades associated with channel {tag}", on="yellow")
+            logging.info(f"Attempting to close all trades associated with channel {tag}", color="yellow")
         else:
-            logging.info(f"Attempting to close {coin} trades associated with channel {tag}", on="yellow")
+            logging.info(f"Attempting to close {coin} trades associated with channel {tag}", color="yellow")
         async with self.olock:
             removed = []
             for order_id, order in self.state["orders"].items():
@@ -153,11 +153,13 @@ class FuturesTrader:
                         type=OrderType.MARKET,
                         quantity=self._round_qty(order["sym"], quantity),
                     )
-                    logging.info(f"Closed position for {order}, resp: {resp}", on="yellow")
+                    logging.info(f"Closed position for {order}, resp: {resp}", color="yellow")
                 except Exception as err:
                     logging.error(f"Failed to close position for {order_id}, err: {err}")
             for oid in removed:
                 self.state["orders"].pop(oid, None)
+            if not removed:
+                logging.info(f"Didn't find any matching positions for {tag} to close", color="yellow")
 
     async def _gather_orders(self):
         async def _gatherer():
@@ -165,7 +167,7 @@ class FuturesTrader:
             while True:
                 signal = await self.order_queue.get()
                 if not re.search(r"^[A-Z0-9]+$", signal.coin):
-                    logging.info(f"Unknown symbol {signal.coin} in signal", on="yellow")
+                    logging.info(f"Unknown symbol {signal.coin} in signal", color="yellow")
                     continue
                 for i in range(3):
                     if i > 0:
@@ -175,12 +177,12 @@ class FuturesTrader:
                         if registered:
                             await self._place_order(signal)
                         else:
-                            logging.info("Ignoring signal because order exists for symbol", on="yellow")
+                            logging.info("Ignoring signal because order exists for symbol", color="yellow")
                         break
                     except PriceUnavailableException:
-                        logging.info(f"Price unavailable for {signal.coin}", on="yellow")
+                        logging.info(f"Price unavailable for {signal.coin}", red="yellow")
                     except EntryCrossedException as err:
-                        logging.info(f"Price went too fast ({err.price}) for signal {signal}", on="yellow")
+                        logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
                     except Exception as err:
                         logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
                         await self._unregister_order(signal)  # unknown error - don't block symbols from future signals
@@ -332,13 +334,13 @@ class FuturesTrader:
                         return
                 if OrderID.is_wait(order_id) or OrderID.is_market(order_id):
                     entry = float(info["ap"])
-                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})", on="green")
+                    logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})", color="green")
                     async with self.olock:
                         self.state["orders"][order_id]["ent"] = entry
                     await self._place_collection_orders(order_id)
                 elif OrderID.is_stop_loss(order_id):
                     async with self.olock:
-                        logging.info(f"Order {order_id} hit stop loss. Removing TP orders...", on="red")
+                        logging.info(f"Order {order_id} hit stop loss. Removing TP orders...", color="red")
                         sl = self.state["orders"].pop(order_id)
                         parent = self.state["orders"].pop(sl["parent"])
                         for oid in parent["t_ord"]:
@@ -361,8 +363,8 @@ class FuturesTrader:
                 new_price, quantity = parent["ent"], parent["qty"]
             elif tp_id == targets[-1]:
                 logging.info(f"All TP orders hit. Removing parent {parent}")
-                parent = self.state.pop(tp["parent"])
-                self.state.pop(parent["s_ord"])
+                parent = self.state["orders"].pop(tp["parent"])
+                self.state["orders"].pop(parent["s_ord"])
                 await self._cancel_order(parent["s_ord"], parent["sym"])
                 return
             else:
@@ -468,7 +470,7 @@ class FuturesTrader:
                             continue
                         if now < (order["crt"] + WAIT_ORDER_EXPIRY):
                             continue
-                        logging.warning(f"Wait order {order_id} has expired. Removing...", on="yellow")
+                        logging.warning(f"Wait order {order_id} has expired. Removing...", color="yellow")
                         removed.append(order_id)
                         await self._cancel_order(order_id, order["sym"])
                     for order_id in removed:
