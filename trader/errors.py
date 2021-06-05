@@ -11,4 +11,4 @@ class EntryCrossedException(Exception):
 class CloseTradeException(Exception):
     def __init__(self, tag, coin=None):
         self.tag = tag
-        self.coin = coin
+        self.coin = coin.upper() if coin else None

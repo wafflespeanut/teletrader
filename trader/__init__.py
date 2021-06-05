@@ -12,8 +12,9 @@ from cachetools import TTLCache
 
 from .errors import EntryCrossedException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import Signal, CHANNELS
+from .signal import Signal
 from .user_stream import UserStream
+from .utils import NamedLock
 
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
 NEW_ORDER_TIMEOUT = 5 * 60
@@ -87,6 +88,7 @@ class FuturesTrader:
         self.prices: dict = {}
         self.symbols: dict = {}
         self.price_streamer = None
+        self.clocks = NamedLock()
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.order_queue = asyncio.Queue()
@@ -114,12 +116,6 @@ class FuturesTrader:
             if item["asset"] == "USDT":
                 self.balance = float(item["balance"])
         logging.info(f"Account balance: {self.balance} USDT", on="blue")
-
-    def get_signal(self, chat_id: int, text: str) -> Signal:
-        for ch in CHANNELS:
-            if ch.chan_id != chat_id:
-                continue
-            return ch.parse(text)
 
     async def queue_signal(self, signal: Signal):
         await self.order_queue.put(signal)
@@ -149,6 +145,7 @@ class FuturesTrader:
                 try:
                     resp = await self.client.futures_create_order(
                         symbol=order["sym"],
+                        positionSide="LONG" if order["side"] == "BUY" else "SHORT",
                         side="SELL" if order["side"] == "BUY" else "BUY",
                         type=OrderType.MARKET,
                         quantity=self._round_qty(order["sym"], quantity),
@@ -169,25 +166,31 @@ class FuturesTrader:
                 if not re.search(r"^[A-Z0-9]+$", signal.coin):
                     logging.info(f"Unknown symbol {signal.coin} in signal", color="yellow")
                     continue
-                for i in range(3):
-                    if i > 0:
-                        await self._unregister_order(signal)
-                    try:
-                        registered = await self._register_order_for_signal(signal)
-                        if registered:
-                            await self._place_order(signal)
-                        else:
-                            logging.info("Ignoring signal because order exists for symbol", color="yellow")
-                        break
-                    except PriceUnavailableException:
-                        logging.info(f"Price unavailable for {signal.coin}", red="yellow")
-                    except EntryCrossedException as err:
-                        logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
-                    except Exception as err:
-                        logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
-                        await self._unregister_order(signal)  # unknown error - don't block symbols from future signals
-                        break
-                    await asyncio.sleep(5)
+
+                async def _process(signal):
+                    # Process one order at a time for each symbol
+                    async with self.clocks.lock(signal.coin):
+                        for i in range(3):
+                            try:
+                                registered = await self._register_order_for_signal(signal)
+                                if registered:
+                                    await self._place_order(signal)
+                                else:
+                                    logging.info("Ignoring signal because order exists for symbol", color="yellow")
+                                return
+                            except PriceUnavailableException:
+                                logging.info(f"Price unavailable for {signal.coin}", red="yellow")
+                            except EntryCrossedException as err:
+                                logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
+                            except Exception as err:
+                                logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
+                                await self._unregister_order(signal)  # unknown error - don't block future signals
+                                return
+                            if i < 2:
+                                await asyncio.sleep(5)
+                                await self._unregister_order(signal)
+
+                asyncio.ensure_future(_process(signal))
 
         asyncio.ensure_future(_gatherer())
 
@@ -212,6 +215,7 @@ class FuturesTrader:
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
         params = {
             "symbol": symbol,
+            "positionSide": "LONG" if signal.is_long else "SHORT",
             "side": "BUY" if signal.is_long else "SELL",
             "type": OrderType.MARKET,
             "quantity": self._round_qty(symbol, quantity),
@@ -276,6 +280,7 @@ class FuturesTrader:
                     "symbol": symbol,
                     "type": OrderType.LIMIT,
                     "timeInForce": "GTC",
+                    "positionSide": "LONG" if odata["side"] == "BUY" else "SHORT",
                     "side": "SELL" if odata["side"] == "BUY" else "BUY",
                     "newClientOrderId": tgt_order_id,
                     "price": self._round_price(symbol, tgt),
@@ -359,8 +364,9 @@ class FuturesTrader:
                 if parent.get("s_ord") is None:
                     logging.warning(f"SL doesn't exist for order {parent}")
                     return
-                logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}", color="red")
-                new_price, quantity = parent["ent"], parent["qty"]
+                logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}, closing trade", color="red")
+                await self.close_trades(parent["tag"], parent["sym"].replace("USDT", ""))
+                return
             elif tp_id == targets[-1]:
                 logging.info(f"All TP orders hit. Removing parent {parent}")
                 parent = self.state["orders"].pop(tp["parent"])
@@ -383,13 +389,14 @@ class FuturesTrader:
                 await self._cancel_order(odata["s_ord"], symbol)
             params = {
                 "symbol": symbol,
+                "positionSide": "LONG" if odata["side"] == "BUY" else "SHORT",
                 "side": "SELL" if odata["side"] == "BUY" else "BUY",
                 "type": OrderType.STOP_MARKET,
                 "newClientOrderId": sl_order_id,
                 "stopPrice": self._round_price(symbol, new_price if new_price is not None else odata["sl"]),
                 "quantity": self._round_qty(symbol, (quantity if quantity is not None else odata["qty"])),
             }
-            for i in range(4):
+            for _ in range(2):
                 try:
                     resp = await self.client.futures_create_order(**params)
                     odata["s_ord"] = sl_order_id
@@ -398,19 +405,14 @@ class FuturesTrader:
                     }
                     logging.info(f"Created SL order {sl_order_id} for parent {parent_id}, "
                                  f"resp: {resp}, params: {json.dumps(params)}")
+                    break
                 except Exception as err:
                     logging.error(f"Failed to create SL order for parent {parent_id}: {err}, "
                                   f"params: {json.dumps(params)}")
                     if isinstance(err, BinanceAPIException) and err.code == -2021:  # price is around SL now
-                        if i < 3:  # Attempt thrice before giving up
-                            logging.info(f"Waiting to place limit SL order for parent {parent_id}")
-                            await asyncio.sleep(3)
-                        else:
-                            logging.info(f"Placing market order for parent {parent_id} "
-                                         "after multiple attempts to create SL order", color="yellow")
-                            params["type"] = OrderType.MARKET
-                        continue
-                break
+                        logging.info(f"Placing market order for parent {parent_id} "
+                                     "after attempt to create SL order", color="yellow")
+                        params["type"] = OrderType.MARKET
 
     async def _watch_orders(self):
         async def _watcher():
@@ -528,7 +530,7 @@ class FuturesTrader:
         async with self.olock:
             self.sig_cache.expire()
             # Same provider can't give signal for same symbol within 20 seconds
-            key = f"{signal.coin}_{signal.tag}"
+            key = f"{signal.coin}_{signal.tag}_{'long' if signal.is_long else 'short'}"
             if self.sig_cache.get(key) is not None:
                 return False
             for odata in self.state["orders"].values():
@@ -537,10 +539,6 @@ class FuturesTrader:
                     continue
                 if odata.get("parent") is not None or odata.get("s_ord") is None:
                     continue
-                is_buy = odata["sl"] < odata["ent"]
-                if (signal.is_short and is_buy) or (signal.is_long and not is_buy):
-                    logging.warning(f"Ignoring discrepant signal for {signal.coin}", color="red")
-                    return False
             self.sig_cache[key] = ()
             return True
 

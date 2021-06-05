@@ -4,6 +4,7 @@ from telethon.tl.custom import Message
 from . import FuturesTrader
 from .errors import CloseTradeException
 from .logger import DEFAULT_LOGGER as logging
+from .signal import Signal
 
 
 class TeleTrader(TelegramClient):
@@ -33,15 +34,15 @@ class TeleTrader(TelegramClient):
             await self.disconnect()
 
     async def _handler(self, event: Message):
-        signal = None
+        sig = None
         try:
-            signal = self.trader.get_signal(event.chat_id, event.text)
+            sig = Signal.parse(event.chat_id, event.text)
         except CloseTradeException as err:
             coin = err.coin
             reply = await event.get_reply_message()
             if reply is not None:
                 try:
-                    parent = self.trader.get_signal(event.chat_id, reply.text)
+                    parent = Signal.parse(event.chat_id, reply.text)
                     coin = parent.coin
                 except Exception:
                     logging.exception(f"Unable to parse previous message {reply.text} as signal")
@@ -52,8 +53,8 @@ class TeleTrader(TelegramClient):
         except Exception:
             logging.exception(f"Ignoring message {event.text} due to parse failure")
 
-        if signal is None:
+        if sig is None:
             return
 
-        logging.info(f"Received signal {signal}", color="cyan")
-        await self.trader.queue_signal(signal)
+        logging.info(f"Received signal {sig}", color="cyan")
+        await self.trader.queue_signal(sig)
