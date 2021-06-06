@@ -36,7 +36,7 @@ class Signal:
 
     @classmethod
     def parse(cls, chat_id: int, text: str):
-        for ch in [BFP, BPS, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS, RM, TCA, VIPCS, WB]:
+        for ch in [BFP, BPS, BUSA, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS, RM, TCA, VIPCS, WB]:
             if ch.chan_id != chat_id:
                 continue
             return ch.parse(text.lower())
@@ -98,7 +98,7 @@ class BFP:
             res = extract_symbol(line)
             if res:
                 c = res[1]
-                e = extract_optional_number(line)
+                e = extract_optional_number(line.split("usdt")[-1])
             if "entry point" in line:
                 e = extract_optional_number(line)
             if "targets" in line:
@@ -129,12 +129,33 @@ class BPS:
             res = extract_symbol(line)
             if res:
                 c = res[1]
-                e = extract_optional_number(line)
+                e = extract_optional_number(line.split("usdt")[-1])
             if "target" in line:
                 t = extract_numbers(line)
             if "stop loss" in line:
                 sl = extract_optional_number(line)
         assert c and e and t and sl
+        return Signal(c, [e], t, sl, tag=cls.__name__)
+
+
+class BUSA:
+    chan_id = -1001297791129
+
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert re.search(r"/usdt x[0-9]+", text)
+        c, e, t, sl = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+            if "now" in line:
+                e = extract_optional_number(line)
+            if "target" in line:
+                t = extract_numbers(line)
+            if "stop" in line:
+                sl = extract_optional_number(line)
+        assert c and e and t
         return Signal(c, [e], t, sl, tag=cls.__name__)
 
 
@@ -260,7 +281,7 @@ class MCVIP:
             res = extract_symbol(line, prefix="")
             if res:
                 c = res[1]
-                er = extract_numbers(line)
+                er = extract_numbers(line.split("usdt")[-1])
             if "target" in line:
                 t = extract_numbers(line)
             if "stop" in line:
@@ -433,10 +454,6 @@ class WB:
                 sl = extract_optional_number(line)
         assert c and er and t and sl
         return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class BUSA:
-    chan_id = -1001297791129
 
 
 class E:

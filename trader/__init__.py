@@ -143,13 +143,19 @@ class FuturesTrader:
                     if self.state["orders"].get(tid):
                         quantity += q
                 try:
-                    resp = await self.client.futures_create_order(
-                        symbol=order["sym"],
-                        positionSide="LONG" if order["side"] == "BUY" else "SHORT",
-                        side="SELL" if order["side"] == "BUY" else "BUY",
-                        type=OrderType.MARKET,
-                        quantity=self._round_qty(order["sym"], quantity),
-                    )
+                    if quantity == 0:
+                        resp = await self.client.futures_create_order(
+                            symbol=order["sym"],
+                            positionSide="LONG" if order["side"] == "BUY" else "SHORT",
+                            side="SELL" if order["side"] == "BUY" else "BUY",
+                            type=OrderType.MARKET,
+                            quantity=self._round_qty(order["sym"], quantity),
+                        )
+                    else:
+                        resp = await self.client.futures_cancel_order(
+                            symbol=order["sym"],
+                            origClientOrderId=order_id,
+                        )
                     logging.info(f"Closed position for {order}, resp: {resp}", color="yellow")
                 except Exception as err:
                     logging.error(f"Failed to close position for {order_id}, err: {err}")
@@ -176,10 +182,11 @@ class FuturesTrader:
                                 if registered:
                                     await self._place_order(signal)
                                 else:
-                                    logging.info("Ignoring signal because order exists for symbol", color="yellow")
+                                    logging.info(f"Ignoring signal from {signal.tag} because order exists "
+                                                 f"for {signal.coin}", color="yellow")
                                 return
                             except PriceUnavailableException:
-                                logging.info(f"Price unavailable for {signal.coin}", red="yellow")
+                                logging.info(f"Price unavailable for {signal.coin}", color="red")
                             except EntryCrossedException as err:
                                 logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
                             except Exception as err:
@@ -530,7 +537,7 @@ class FuturesTrader:
         async with self.olock:
             self.sig_cache.expire()
             # Same provider can't give signal for same symbol within 20 seconds
-            key = f"{signal.coin}_{signal.tag}_{'long' if signal.is_long else 'short'}"
+            key = self._cache_key(signal)
             if self.sig_cache.get(key) is not None:
                 return False
             for odata in self.state["orders"].values():
@@ -544,7 +551,10 @@ class FuturesTrader:
 
     async def _unregister_order(self, signal: Signal):
         async with self.olock:
-            self.sig_cache.pop(f"{signal.coin}_{signal.tag}", None)
+            self.sig_cache.pop(self._cache_key(signal), None)
+
+    def _cache_key(self, signal: Signal):
+        return f"{signal.coin}_{signal.tag}_{'long' if signal.is_long else 'short'}"
 
     # MARK: Rouding for min quantity and min price for symbols
 

@@ -1,7 +1,7 @@
 import unittest
 
 from .errors import CloseTradeException
-from .signal import (BFP, BPS, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS,
+from .signal import (BFP, BPS, BUSA, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS,
                      RM, TCA, VIPCS, WB, Signal)
 
 
@@ -21,14 +21,14 @@ class TestBFP(TestSignal):
     def test_1(self):
         self._assert_signal(
             BFP, """Binance Futures  Signal
-Long/Buy #LINK/USDT 32.605
-Targets 32.735 - 32.865 - 33.061 - 33.420 - 33.909
-Stoploss 31.626
+Long/Buy #1INCH/USDT 3.2605
+Targets 3.2735 - 3.2865 - 3.3061 - 3.3420 - 3.3909
+Stoploss 3.1626
 Leverage 5-10x
 By (@BFP)
 👆🏼👆🏼This is an Early signal. Buy #LINK when it comes around the entry price and maintain the stop loss """
             """- Just Trade with 3 to 5% of Total funds""",
-            Signal("LINK", [32.605], [32.735, 32.865, 33.061, 33.42, 33.909], 31.626, 0.05, 10))
+            Signal("1INCH", [3.2605], [3.2735, 3.2865, 3.3061, 3.342, 3.3909], 3.1626, 0.05, 10))
 
     def test_2(self):
         self._assert_signal(
@@ -80,10 +80,10 @@ class TestBPS(TestSignal):
     def test_1(self):
         self._assert_signal(
             BPS, """Binance Futures/Bitmex/Bybit/Bitseven Signal# 1325
-Get into Long #LTC/USDT @ 176
+Get into Long #1INCH/USDT @ 1.76
 Leverage – 10x
-Target - 177-178-181-186
-Stop Loss - 168""", Signal("LTC", [176], [177, 178, 181, 186], 168, 0.03, 10))
+Target - 1.77-1.78-1.81-1.86
+Stop Loss - 1.68""", Signal("1INCH", [1.76], [1.77, 1.78, 1.81, 1.86], 1.68, 0.03, 10))
 
     def test_2(self):
         coin = None
@@ -209,6 +209,13 @@ Stop 2333""", None)
         except CloseTradeException as exp:
             coin = exp.coin
         self.assertEqual(coin, "ALGO")
+
+    def test_4(self):
+        self._assert_signal(
+            MCVIP, """1INCH/USDT ️ Long above 4.0009
+Targets: 4.0169 - 4.034- 4.0503 - 4.082- 4.162
+Leverage 10x
+Stop 3.799""", Signal("1INCH", [4.0009], [4.0169, 4.034, 4.0503, 4.082, 4.162], 3.799, 0.05, 10))
 
 
 class TestMVIP(TestSignal):
@@ -497,4 +504,28 @@ Use Only 2-5% Of Your Total Portfolio
 
 https://www.tradingview.com/""",
             Signal("ANKR", [0.10352, 0.10745], [0.10951, 0.12, 0.15, 0.18, 0.21], 0.10164, 0.03, 10)
+        )
+
+
+class TestBUSA(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            BUSA, """BTS/USDT x10 “SHORT”
+
+Now : 0.0555$
+
+Target : 0.052$ - 0.05$
+
+0.06$ can be stop""", Signal("BTS", [0.0555], [0.052, 0.05], 0.06)
+        )
+
+    def test_2(self):
+        self._assert_signal(
+            BUSA, """NKN/USDT x10
+
+Now : 0.387$
+
+Target : 0.4$ - 0.42$
+
+Enjoy!!""", Signal("NKN", [0.387], [0.4, 0.42])
         )
