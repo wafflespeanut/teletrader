@@ -268,45 +268,51 @@ class FuturesTrader:
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
-
-        targets = []
         async with self.olock:
             odata = self.state["orders"][order_id]
-            symbol = odata["sym"]
-            targets = odata["tgt"][:MAX_TARGETS]
             if odata.get("t_ord"):
                 logging.warning(f"TP order(s) already exist for parent {order_id}")
                 return
 
-        remaining = quantity = odata["qty"]
-        for i, tgt in enumerate(targets):
-            quantity *= 0.5
-            async with self.olock:
-                tgt_order_id = OrderID.target()
-                params = {
-                    "symbol": symbol,
-                    "type": OrderType.LIMIT,
-                    "timeInForce": "GTC",
-                    "positionSide": "LONG" if odata["side"] == "BUY" else "SHORT",
-                    "side": "SELL" if odata["side"] == "BUY" else "BUY",
-                    "newClientOrderId": tgt_order_id,
-                    "price": self._round_price(symbol, tgt),
+            targets = odata["tgt"][:MAX_TARGETS]
+            remaining = quantity = odata["qty"]
+            for i, tgt in enumerate(targets):
+                quantity *= 0.5
+                # NOTE: Don't close position (as it'll affect other orders)
+                if i == len(targets) - 1:
+                    quantity = remaining
+                tgt_order_id = self._create_target_order(
+                    order_id, odata["sym"], odata["side"], tgt, quantity)
+                if tgt_order_id is None:
+                    continue
+                odata["t_ord"].append(tgt_order_id)
+                odata["t_q"].append(quantity)
+                self.state["orders"][tgt_order_id] = {
+                    "parent": order_id,
+                    "filled": False,
                 }
-                if i < len(odata["tgt"]) - 1:
-                    params["quantity"] = self._round_qty(symbol, quantity)
-                else:  # Don't close position (as it'll affect other orders)
-                    params["quantity"] = self._round_qty(symbol, remaining)
-                try:
-                    resp = await self.client.futures_create_order(**params)
-                    odata["t_ord"].append(tgt_order_id)
-                    odata["t_q"].append(params["quantity"])
-                    self.state["orders"][tgt_order_id] = {"parent": order_id}
-                    remaining -= params["quantity"]  # Deduct after placing successful order
-                    logging.info(f"Created limit order {tgt_order_id} for parent {order_id}, "
-                                 f"resp: {resp}, params: {json.dumps(params)}")
-                except Exception as err:
-                    logging.error(f"Failed to create target order for parent {order_id}: {err}, "
-                                  f"params: {json.dumps(params)}")
+                remaining -= quantity
+
+    async def _create_target_order(self, order_id, symbol, side, tgt_price, quantity):
+        tgt_order_id = OrderID.target()
+        params = {
+            "symbol": symbol,
+            "type": OrderType.LIMIT,
+            "timeInForce": "GTC",
+            "positionSide": "LONG" if side == "BUY" else "SHORT",
+            "side": "SELL" if side == "BUY" else "BUY",
+            "newClientOrderId": tgt_order_id,
+            "price": self._round_price(symbol, tgt_price),
+            "quantity": self._round_qty(symbol, quantity),
+        }
+        try:
+            resp = await self.client.futures_create_order(**params)
+            logging.info(f"Created limit order {tgt_order_id} for parent {order_id}, "
+                         f"resp: {resp}, params: {json.dumps(params)}")
+            return tgt_order_id
+        except Exception as err:
+            logging.error(f"Failed to create target order for parent {order_id}: {err}, "
+                          f"params: {json.dumps(params)}")
 
     async def _subscribe_futures_user(self):
         async def _handler():
@@ -337,13 +343,12 @@ class FuturesTrader:
         elif msg["e"] == UserEventType.OrderTradeUpdate:
             info = msg["o"]
             order_id = info["c"]
+            async with self.olock:
+                o = self.state["orders"].get(order_id)
+                if o is None:
+                    logging.warning(f"Received order {order_id} but missing in state")
+                    return
             if info["X"] == "FILLED":
-                # We might get duplicated data when we switch connections, so do some checks
-                async with self.olock:
-                    o = self.state["orders"].get(order_id)
-                    if o is None:
-                        logging.warning(f"Received order {order_id} but missing in state")
-                        return
                 if OrderID.is_wait(order_id) or OrderID.is_market(order_id):
                     entry = float(info["ap"])
                     logging.info(f"Placing TP/SL orders for fulfilled order {order_id} (entry: {entry})", color="green")
@@ -364,7 +369,8 @@ class FuturesTrader:
 
     async def _move_stop_loss(self, tp_id: str):
         async with self.olock:
-            tp = self.state["orders"].pop(tp_id)
+            tp = self.state["orders"][tp_id]
+            tp["filled"] = True
             parent = self.state["orders"][tp["parent"]]
             targets = parent["t_ord"]
             if tp_id not in targets:
@@ -377,6 +383,8 @@ class FuturesTrader:
             elif tp_id == targets[-1]:
                 logging.info(f"All TP orders hit. Removing parent {parent}")
                 parent = self.state["orders"].pop(tp["parent"])
+                for oid in parent["t_ord"]:
+                    self.state["orders"].pop(oid, None)  # It might not exist
                 self.state["orders"].pop(parent["s_ord"])
                 await self._cancel_order(parent["s_ord"], parent["sym"])
                 return
@@ -409,6 +417,7 @@ class FuturesTrader:
                     odata["s_ord"] = sl_order_id
                     self.state["orders"][sl_order_id] = {
                         "parent": parent_id,
+                        "filled": False,
                     }
                     logging.info(f"Created SL order {sl_order_id} for parent {parent_id}, "
                                  f"resp: {resp}, params: {json.dumps(params)}")
@@ -424,42 +433,7 @@ class FuturesTrader:
     async def _watch_orders(self):
         async def _watcher():
             while True:
-                open_symbols = []
-                open_orders = {}
-                async with self.olock:
-                    resp = await self.client.futures_get_open_orders()
-                    for order in resp:
-                        open_orders[order["clientOrderId"]] = order
-                    logging.info(f"Checking {len(open_orders)} orders...")
-                    for oid, order in open_orders.items():
-                        odata = self.state["orders"].get(oid)
-                        if OrderID.is_stop_loss(oid) or OrderID.is_target(oid):
-                            if odata is not None:
-                                parent = self.state["orders"].get(odata.get("parent"))
-                                if parent is None:
-                                    logging.info(f"Removing orphan {oid}", color="yellow")
-                                    self.state["orders"].pop(oid)
-                                    odata = None
-                            if odata is None:
-                                await self._cancel_order(oid, order["symbol"])
-                                continue
-                        elif OrderID.is_market(oid) or OrderID.is_wait(oid):
-                            open_symbols.append(order["symbol"][:-4])
-                    removed = []
-                    for oid, odata in self.state["orders"].items():
-                        if open_orders.get(oid) is None:
-                            if OrderID.is_market(oid) or OrderID.is_wait(oid):
-                                # Remove parent if it's old and none of the child orders exist
-                                if (time.time() - odata["crt"]) < NEW_ORDER_TIMEOUT:
-                                    continue
-                                cids = ([odata["s_ord"]] if odata.get("s_ord") else []) + odata["t_ord"]
-                                if not all(open_orders.get(i) is None for i in cids):
-                                    continue
-                            removed.append(oid)
-                    for oid in removed:
-                        logging.warning(f"Removing outdated order {oid}", color="yellow")
-                        self.state["orders"].pop(oid)
-
+                open_symbols = await self._expire_outdated_orders_and_get_open_symbols()
                 async with self.slock:
                     redundant = set(self.state["streams"]).difference(open_symbols)
                     if redundant:
@@ -487,6 +461,101 @@ class FuturesTrader:
                 await asyncio.sleep(ORDER_WATCH_INTERVAL)
 
         asyncio.ensure_future(_watcher())
+
+    async def _expire_outdated_orders_and_get_open_symbols(self):
+        open_symbols = []
+        open_orders, positions = {}, {}
+        sl_orders = []
+        async with self.olock:
+            resp = await self.client.futures_account()
+            for pos in resp["positions"]:
+                side = pos["positionSide"]
+                if side == "BOTH":
+                    continue
+                k = pos["symbol"] + side
+                pos[k] = pos["positionAmt"]
+            resp = await self.client.futures_get_open_orders()
+            for order in resp:
+                open_orders[order["clientOrderId"]] = order
+            logging.info(f"Checking {len(open_orders)} orders for {len(positions)} positions...")
+            for oid, order in open_orders.items():
+                odata = self.state["orders"].get(oid)
+                if OrderID.is_market(oid) or OrderID.is_wait(oid):
+                    open_symbols.append(order["symbol"][:-4])
+                elif odata and (OrderID.is_target(oid) or OrderID.is_stop_loss(oid)):
+                    odata["filled"] = False
+
+            removed = []
+            for oid, odata in list(self.state["orders"].items()):
+                if not (OrderID.is_wait(oid) or OrderID.is_market(oid)):
+                    continue
+                if open_orders.get(oid) is not None:  # only filled orders
+                    continue
+                if (time.time() - odata["crt"]) < NEW_ORDER_TIMEOUT:  # must be old
+                    continue
+                if odata.get("s_ord") is None:  # must have stop loss order
+                    continue
+                side = "LONG" if odata["side"] == "BUY" else "SHORT"
+                if not pos.get(odata["sym"] + side):
+                    removed += odata["t_ord"] + [oid, odata["s_ord"]]
+                    continue
+                children = [odata["s_ord"]] + odata["t_ord"]
+                for cid in children:
+                    if open_orders.get(cid) is not None:  # ignore open orders
+                        continue
+                    is_filled = False
+                    try:
+                        cdata = await self.client.get_order(
+                            symbol=odata["sym"], origClientOrderId=cid)
+                        is_filled = cdata["status"] == "FILLED"
+                    except Exception as err:
+                        logging.warning(f"Error fetching order {cid} for parent {odata}: {err}")
+                    if is_filled:
+                        self.state["orders"][cid] = {
+                            "parent": oid,
+                            "filled": True,
+                        }
+                    else:
+                        logging.info(f"Missing order {cid} detected for parent {oid}", color="yellow")
+                        self.state["orders"].pop(cid, None)
+                order_hit = []
+                for i in range(len(children)):
+                    cdata = self.state["orders"].get(children[i])
+                    order_hit.append(cdata["filled"] if cdata else False)
+                    if cdata is not None:
+                        continue
+                    if i == 0:
+                        sl_orders.append({"id": oid})
+                        continue
+                    tgt_id = await self._create_target_order(
+                        oid, odata["sym"], odata["side"], odata["tgt"][i - 1], odata["t_q"][i - 1])
+                    if tgt_id is not None:
+                        odata["t_ord"][i - 1] = tgt_id
+                        self.state["orders"][tgt_id] = {
+                            "parent": oid,
+                            "filled": False,
+                        }
+                if order_hit[0] or all(order_hit[1:]):  # All TPs or SL hit
+                    removed += odata["t_ord"] + [oid, odata["s_ord"]]
+
+            for oid in removed:
+                logging.warning(f"Removing outdated order {oid}", color="yellow")
+                self.state["orders"].pop(oid, None)
+
+            for o in sl_orders:
+                oid = o["id"]
+                for i, tid in enumerate(self.state["orders"][oid]["t_ord"]):
+                    if self.state["orders"][tid]["filled"]:
+                        o["tp"] = tid
+                        break
+
+        for o in sl_orders:
+            if o.get("tp"):
+                await self._move_stop_loss(o["tp"])
+            else:
+                await self._place_sl_order(o["id"])
+
+        return open_symbols
 
     async def _subscribe_futures(self, coin: str = None, resub=False):
         async with self.slock:
