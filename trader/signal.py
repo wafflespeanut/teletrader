@@ -27,18 +27,19 @@ class Signal:
         self.sl = sl
         self.targets = targets
         self.fraction = fraction
-        self.leverage = min(10, leverage)
+        self.leverage = leverage
         self.tag = tag
         prev = self.entries[0]
         for t in self.targets:
             assert (t > prev if self.is_long else t < prev)
             prev = t
+        if self.sl:
+            assert self.sl < self.entries[0] if self.is_long else self.sl > self.entries[-1]
 
     @classmethod
     def parse(cls, chat_id: int, text: str):
-        for ch in [BFP, BPS, BUSA, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS, RM, TCA, VIPCS, WB]:
-            if ch.chan_id != chat_id:
-                continue
+        ch = CHANNELS.get(chat_id)
+        if ch:
             return ch.parse(text.lower())
 
     @property
@@ -88,9 +89,26 @@ class Signal:
                 f"e: {self.entries}, sl: {self.sl}, targets: {self.targets})")
 
 
-class BFP:
-    chan_id = -1001418856446
+class BAW:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "binance futures" in text
+        c, er, sl, t = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "targets" in line:
+                t = extract_numbers(line)
+            if "stop loss" in line:
+                sl = extract_numbers(line)[-1]
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
+
+class BFP:
     @classmethod
     def parse(cls, text: str) -> Signal:
         c, e, sl, t = [None] * 4
@@ -106,12 +124,10 @@ class BFP:
             if re.search(r"^stop.*(loss)", line):
                 sl = extract_optional_number(line)
         assert c and e and sl and t
-        return Signal(c, [e], t, sl, fraction=0.05, tag=cls.__name__)
+        return Signal(c, [e], t, sl, fraction=0.04, tag=cls.__name__)
 
 
 class BPS:
-    chan_id = -1001397582022
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         if "exit trade" in text:
@@ -139,29 +155,70 @@ class BPS:
 
 
 class BUSA:
-    chan_id = -1001297791129
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert re.search(r"/usdt x[0-9]+", text)
-        c, e, t, sl = [None] * 4
+        t = []
+        c, er, sl = [None] * 3
         for line in map(str.strip, text.split("\n")):
             res = extract_symbol(line, prefix=None)
             if res:
                 c = res[1]
-            if "now" in line:
-                e = extract_optional_number(line)
-            if "target" in line:
+            if "now" in line or "entry" in line:
+                er = extract_numbers(line)
+            if re.search(r"target.*\d.*:", line):
+                t.append(extract_numbers(line)[-1])
+            elif "target" in line:
                 t = extract_numbers(line)
             if "stop" in line:
                 sl = extract_optional_number(line)
-        assert c and e and t
-        return Signal(c, [e], t, sl, tag=cls.__name__)
+        assert c and er and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
+class BVIP:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "leverage" in text
+        t = []
+        c, er, sl, lev = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+                er = extract_numbers(line)
+            if "targets" in line:
+                t = extract_numbers(line)
+            if "leverage" in line:
+                lev = int(extract_optional_number(line))
+            if "stop" in line:
+                sl = extract_optional_number(line)
+        assert c and er and t and sl and lev
+        return Signal(c, er, t, sl, leverage=lev, tag=cls.__name__)
+
+
+class C:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        if "close " in text:
+            raise CloseTradeException(cls.__name__, text.split(" ")[-1])
+
+        assert "leverage" in text
+        c, er, sl, t = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix="")
+            if res:
+                c = res[1]
+                er = extract_numbers(line.split("usdt")[-1])
+            if "target" in line:
+                t = extract_numbers(line)
+            if "stop" in line:
+                sl = float(line.split(" ")[-1])
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, fraction=0.04, tag=cls.__name__)
 
 
 class CB:
-    chan_id = -1001298917999
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "futures" in text
@@ -181,8 +238,6 @@ class CB:
 
 
 class CCS:
-    chan_id = -1001498099485
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "futures" in text
@@ -202,8 +257,6 @@ class CCS:
 
 
 class CEP:
-    chan_id = -1001286357956
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "leverage" in text
@@ -220,12 +273,10 @@ class CEP:
             if "stoploss" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t[:5], sl, fraction=0.02, tag=cls.__name__)
+        return Signal(c, er, t[:5], sl, fraction=0.02, leverage=20, tag=cls.__name__)
 
 
 class CM:
-    chan_id = -1001390568202
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "binance futures" in text
@@ -245,9 +296,28 @@ class CM:
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
-class FWP:
-    chan_id = -1001304374569
+class EBS:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "leverage" in text
+        t = []
+        c, e, lev = [None] * 3
+        lines = list(map(str.strip, text.replace("\n\n", "\n").split("\n")))
+        for i, line in enumerate(lines):
+            res = extract_symbol(line)
+            if res:
+                c = res[1]
+            if "leverage" in line:
+                lev = int(extract_optional_number(line))
+            if "entry" in line:
+                e = extract_numbers(lines[i + 1])[-1]
+            if "target" in line:
+                t.append(extract_numbers(line)[-1])
+        assert c and e and t and lev
+        return Signal(c, [e], t, leverage=lev, tag=cls.__name__)
 
+
+class FWP:
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "leverage" in text or "futures" in text
@@ -264,35 +334,55 @@ class FWP:
             if re.search(r"sto..loss", line):
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t[:5], sl, fraction=0.02, tag=cls.__name__)
+        return Signal(c, er, t[:5], sl, fraction=0.02, leverage=20, tag=cls.__name__)
 
 
-class MCVIP:
-    chan_id = -1001330855662
-
+class FXVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        if "close " in text:
-            raise CloseTradeException(cls.__name__, text.split(" ")[-1])
-
+        assert "binance future" in text
         assert "leverage" in text
-        c, er, sl, t = [None] * 4
+        c, er, t, sl = [None] * 4
         for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, prefix="")
+            res = extract_symbol(line, prefix=None)
             if res:
                 c = res[1]
-                er = extract_numbers(line.split("usdt")[-1])
+            if "entry" in line:
+                er = extract_numbers(line.replace(",", "."))
             if "target" in line:
-                t = extract_numbers(line)
-            if "stop" in line:
-                sl = float(line.split(" ")[-1])
+                t = extract_numbers(line.replace(",", "."))
+            if "stop loss" in line:
+                sl = extract_optional_number(line.replace(",", "."))
         assert c and er and sl and t
-        return Signal(c, er, t, sl, fraction=0.05, tag=cls.__name__)
+        return Signal(c, er, t, sl, fraction=0.02, leverage=20, tag=cls.__name__)
+
+
+class KBV:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "leverage" in text
+        t = []
+        c, er, sl = [None] * 3
+        lines = list(map(str.strip, text.split("\n")))
+        for i, line in enumerate(lines):
+            res = extract_symbol(line)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "sell" in line:
+                t = extract_numbers(lines[i + 1])
+            if "stop loss" in line:
+                sl = extract_optional_number(line)
+        assert c and er and t and sl
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
+class MCVIP(C):
+    pass
 
 
 class MVIP:
-    chan_id = -1001196181927
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         if "close " in text and " when " not in text:
@@ -327,12 +417,10 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, fraction=0.02, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class PTS:
-    chan_id = -1001147998012
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "binance futures" in text
@@ -353,8 +441,6 @@ class PTS:
 
 
 class RM:
-    chan_id = -1001422693443
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "binance futures" in text
@@ -382,8 +468,6 @@ class RM:
 
 
 class TCA:
-    chan_id = -1001239897393
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         if "close position" in text:
@@ -391,6 +475,10 @@ class TCA:
             raise CloseTradeException(cls.__name__, coin)
         elif "closing all position" in text:
             raise CloseTradeException(cls.__name__)
+        close_match = re.search(r"(?:close|closing) ([a-z0-9]+)", text)
+        if close_match:
+            coin = close_match[1]
+            raise CloseTradeException(cls.__name__, coin)
 
         assert "leverage" in text
         c, er, t, sl, lev = [None] * 5
@@ -413,31 +501,40 @@ class TCA:
 
 
 class VIPCS:
-    chan_id = -1001225455045
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         t = []
         c, e, sl = [None] * 3
         assert "leverage" in text
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, prefix=None)
+        lines = list(map(str.strip, text.split("\n")))
+        for i, line in enumerate(lines):
+            res = extract_symbol(line, prefix=("#" if "⚡" in line else None))
             if res:
                 c = res[1]
             if "buy" in line:
                 e = extract_optional_number(line)
-            if "target" in line:
+            elif "entry target" in line:
+                e = extract_numbers(lines[i + 1])[-1]
+            if "take-profit target" in line:
+                j = i + 1
+                while True:
+                    n = extract_numbers(lines[j])
+                    if len(n) < 2:
+                        break
+                    t.append(n[-1])
+                    j += 1
+            elif "target " in line:
                 res = extract_numbers(line)
                 t.append(res[1])
             if "stoploss" in line:
                 sl = extract_optional_number(line)
+            elif "stop target" in line:
+                sl = extract_numbers(lines[i + 1])[-1]
         assert c and e and t and sl
         return Signal(c, [e], t, sl, fraction=0.05, tag=cls.__name__)
 
 
 class WB:
-    chan_id = -1001434920650
-
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "future call" in text
@@ -456,33 +553,31 @@ class WB:
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
-class E:
-    chan_id = -1001248545865
-
-
-class CPH:
-    chan_id = -1001128188148
-
-
-class KSP:
-    chan_id = -1001214337237
-
-
-class LCP:
-    chan_id = -1001321599004
-
-
-class SSP:
-    chan_id = -1001287312554
-
-
-class WCSERA:
-    chan_id = -1001189409565
-
-
-class YCPC:
-    chan_id = -1001482194573
-
-
-class CT:
-    chan_id = -1001394650462
+CHANNELS = {
+    -1001293741800: BAW,
+    -1001418856446: BFP,
+    -1001397582022: BPS,
+    -1001297791129: BUSA,
+    -1001276380825: BVIP,
+    -1001190501437: C,
+    -1001298917999: CB,
+    -1001498099485: CCS,
+    -1001475802140: CCS,
+    -1001312576400: CEP,
+    -1001286357956: CEP,
+    -1001390568202: CM,
+    -1001332814834: EBS,
+    -1001304374569: FWP,
+    -1001342941479: FXVIP,
+    -1001342941479: FXVIP,
+    -1001361758531: FWP,
+    -1001245250001: KBV,
+    -1001330855662: MCVIP,
+    -1001196181927: MVIP,
+    -1001147998012: PTS,
+    -1001422693443: RM,
+    -1001274400840: RM,
+    -1001239897393: TCA,
+    -1001225455045: VIPCS,
+    -1001434920650: WB,
+}

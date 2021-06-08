@@ -1,13 +1,13 @@
 import unittest
 
 from .errors import CloseTradeException
-from .signal import (BFP, BPS, BUSA, CB, CCS, CEP, CM, FWP, MCVIP, MVIP, PTS,
-                     RM, TCA, VIPCS, WB, Signal)
+from .signal import (BAW, BFP, BPS, BUSA, BVIP, CB, CCS, CEP, CM, EBS, FWP, FXVIP,
+                     KBV, MCVIP, MVIP, PTS, RM, TCA, VIPCS, WB, Signal)
 
 
 class TestSignal(unittest.TestCase):
     def _assert_signal(self, cls, text, sig):
-        s = Signal.parse(cls.chan_id, text)
+        s = cls.parse(text.lower())
         self.assertEqual(s.coin, sig.coin)
         self.assertEqual(s.entries, sig.entries)
         self.assertEqual(s.sl, sig.sl)
@@ -28,7 +28,7 @@ Leverage 5-10x
 By (@BFP)
 👆🏼👆🏼This is an Early signal. Buy #LINK when it comes around the entry price and maintain the stop loss """
             """- Just Trade with 3 to 5% of Total funds""",
-            Signal("1INCH", [3.2605], [3.2735, 3.2865, 3.3061, 3.342, 3.3909], 3.1626, 0.05, 10))
+            Signal("1INCH", [3.2605], [3.2735, 3.2865, 3.3061, 3.342, 3.3909], 3.1626, 0.04, 10))
 
     def test_2(self):
         self._assert_signal(
@@ -41,7 +41,7 @@ Leverage - 10x
 Stop Loss - 26970
 By (@BFP)
 ✅✅Maintain the stop loss & Just Trade with 3 to 5% of Total funds""",
-            Signal("BLZ", [28390], [28500, 28615, 28730, 28950, 29525], 26970, 0.05, 10))
+            Signal("BLZ", [28390], [28500, 28615, 28730, 28950, 29525], 26970, 0.04, 10))
 
     def test_3(self):
         self._assert_signal(
@@ -57,7 +57,7 @@ Leverage - 10x
 Stop Loss - 6.290
 By (@BFP)
 ✅✅Maintain the stop loss & Just Trade with 3 to 5% of Total funds""",
-            Signal("ALICE", [5.93], [5.905, 5.885, 5.855, 5.815, 5.69], 6.29, 0.05, 10))
+            Signal("ALICE", [5.93], [5.905, 5.885, 5.855, 5.815, 5.69], 6.29, 0.04, 10))
 
     def test_4(self):
         self._assert_signal(
@@ -73,7 +73,7 @@ Leverage - 10x
 Stop Loss - 33030
 By (@BFP)
 ✅✅Maintain the stop loss & Just Trade with 3 to 5% of Total funds""",
-            Signal("SAND", [35145], [35285, 35425, 35565, 35845, 36550], 33030, 0.05, 10))
+            Signal("SAND", [35145], [35285, 35425, 35565, 35845, 36550], 33030, 0.04, 10))
 
 
 class TestBPS(TestSignal):
@@ -160,7 +160,7 @@ Use 2% Fund Only
 
 LEVERAGE:  10X-20X (CROSS)
 
-BUY & HOLD ✅""", Signal("DOGE", [0.34, 0.365], [0.385, 0.4, 0.414, 0.43, 0.44], 0.28, 0.02, 10))
+BUY & HOLD ✅""", Signal("DOGE", [0.34, 0.365], [0.385, 0.4, 0.414, 0.43, 0.44], 0.28, 0.02, 20))
 
     def test_2(self):
         self._assert_signal(
@@ -182,7 +182,7 @@ Use 2% Fund Only ❗️
 
 LEV :  10X-20X (CROSS)
 
-BUY & HOLD ✅""", Signal("ONT", [2.25, 2.38], [2.52, 2.6, 2.67, 2.73, 2.8], 2.15, 0.02, 10))
+BUY & HOLD ✅""", Signal("ONT", [2.25, 2.38], [2.52, 2.6, 2.67, 2.73, 2.8], 2.15, 0.02, 20))
 
 
 class TestMCVIP(TestSignal):
@@ -191,7 +191,7 @@ class TestMCVIP(TestSignal):
             MCVIP, """BTCUSDT LONG 36705-36200
 Target 37000-37400-38000-38500
 Leverage 10x
-Stop 35680""", Signal("BTC", [36705, 36200], [37000, 37400, 38000, 38500], 35680, 0.05, 10))
+Stop 35680""", Signal("BTC", [36705, 36200], [37000, 37400, 38000, 38500], 35680, 0.04, 10))
 
     def test_2(self):
         self.assertRaises(
@@ -215,7 +215,7 @@ Stop 2333""", None)
             MCVIP, """1INCH/USDT ️ Long above 4.0009
 Targets: 4.0169 - 4.034- 4.0503 - 4.082- 4.162
 Leverage 10x
-Stop 3.799""", Signal("1INCH", [4.0009], [4.0169, 4.034, 4.0503, 4.082, 4.162], 3.799, 0.05, 10))
+Stop 3.799""", Signal("1INCH", [4.0009], [4.0169, 4.034, 4.0503, 4.082, 4.162], 3.799, 0.04, 10))
 
 
 class TestMVIP(TestSignal):
@@ -235,7 +235,7 @@ Leverage ×10
 
 Stop Targets:
 
-1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 0.02, 10))
+1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 0.03, 10))
 
     def test_2(self):
         self._assert_signal(
@@ -252,7 +252,7 @@ Take-Profit Targets:
 Levrage ×50
 
 Stop Targets:
-1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 0.02, 10))
+1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 0.03, 50))
 
     def test_3(self):
         self.assertRaises(
@@ -287,7 +287,7 @@ Take-Profit Targets:
 Leverage : ×50
 
 Stop Targets:
-1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 0.02, 10))
+1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 0.03, 50))
 
     def test_5(self):
         self.assertRaises(AssertionError, self._assert_signal, MVIP, """[In reply to 👑 MVIP 👑]
@@ -311,6 +311,23 @@ Close #BTC/USDT""", None)
         except CloseTradeException as exp:
             coin = exp.coin
         self.assertEqual(coin, None)
+
+    def test_8(self):
+        self.assertRaises(AssertionError, self._assert_signal, MVIP, """⚡️⚡️ #LINK/USDT⚡️⚡️
+
+Entry Zone:
+22.7 - 22.8
+
+Take-Profit Targets:
+
+1) 23.2
+2) 23.7
+3) 24.1
+
+Leverage ×10
+
+Stop Targets:
+1) 21.4""", Signal("LINK", [22.7, 22.8], [23.2, 23.7, 24.1]))
 
 
 class TestTCA(TestSignal):
@@ -351,6 +368,15 @@ Profit is +300%""", None)
         except CloseTradeException as exp:
             coin = exp.coin
         self.assertEqual(coin, None)
+
+    def test_5(self):
+        coin = "UNKNOWN"
+        try:
+            self._assert_signal(
+                TCA, """Closing eth at entry""", None)
+        except CloseTradeException as exp:
+            coin = exp.coin
+        self.assertEqual(coin, "ETH")
 
 
 class TestCB(TestSignal):
@@ -430,6 +456,28 @@ class TestVIPCS(TestSignal):
 
 💫 Leverage : 10x""", Signal("LINK", [27], [22.95, 18.9, 14.85], 31.05, 0.05, 10))
 
+    def test_2(self):
+        self._assert_signal(
+            VIPCS, """⚡⚡ #LINK/USDT ⚡⚡
+Exchanges: Binance Futures
+Signal Type: Regular (Short)
+Leverage: Isolated (10.0X)
+
+Entry Targets:
+1) 27 ✅
+
+Take-Profit Targets:
+1) 24
+2) 21.6
+3) 18.9
+4) 14
+5) 11
+
+Stop Targets:
+1) 29.7
+
+Published By: @V""", Signal("LINK", [27], [24, 21.6, 18.9, 14, 11], 29.7, 0.05))
+
 
 class TestCEP(TestSignal):
     def test_1(self):
@@ -451,7 +499,7 @@ Sell Targets ::
 🔻 StopLoss : 2850
 
 
-#Crypto ✅""", Signal("ETH", [2700, 2660, 2630], [2600, 2560, 2510, 2460, 2400], 2850, 0.02, 10)
+#Crypto ✅""", Signal("ETH", [2700, 2660, 2630], [2600, 2560, 2510, 2460, 2400], 2850, 0.02, 20)
         )
 
 
@@ -529,3 +577,179 @@ Target : 0.4$ - 0.42$
 
 Enjoy!!""", Signal("NKN", [0.387], [0.4, 0.42])
         )
+
+    def test_3(self):
+        self._assert_signal(
+            BUSA, """Blockchain Signal !!
+
+SFP/USDT x10 “LONG”
+
+Entry : 1.185$ - 1.19$
+
+Target 1 : 1.25$
+Target 2 : 1.4$
+Target 3 : 1.6$
+
+Enjoy!!""", Signal("SFP", [1.185, 1.19], [1.25, 1.4, 1.6]))
+
+
+class TestEBS(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            EBS, """#EXCHANGE: Binance(spot)/ Evolve
+Leverage: 50x
+
+ #ETH/USDT
+
+Scalp Setup
+
+Short Entry:
+  2679.00
+
+Target 1 - 2666.48
+Target 2 - 2648.69
+
+by @CRR""", Signal("ETH", [2679], [2666.48, 2648.69], leverage=50))
+
+    def test_2(self):
+        self._assert_signal(
+            EBS, """#EXCHANGE: Binance(spot)/ Evolve
+Leverage: 32
+
+ #BTC/USDT
+
+Scalp Setup
+
+Short Entry:
+  36160
+
+Target 1 - 35959
+Target 2 - 35672
+
+by @CTT""", Signal("BTC", [36160], [35959, 35672], leverage=32))
+
+
+class TestKBV(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            KBV, """#B&BF
+
+#ONT/USDT ️
+#SHORT
+Entry LIMIT: 1.0665
+
+SELL:
+1.0620 - 1.0580 - 1.0535 - 1.0450 - 1.0240
+
+Leverage - 10x
+
+❗️STOP LOSS : 1.120
+
+by @CRR""", Signal("ONT", [1.0665], [1.062, 1.058, 1.0535, 1.045, 1.024], 1.12))
+
+    def test_2(self):
+        self._assert_signal(
+            KBV, """#B&BF
+
+#SNX/USDT ️
+#SHORT
+Entry LIMIT: 11.40
+
+SELL:
+11.300 - 11.255 - 11.205 - 11.120
+11.890
+
+Leverage - 10x
+
+❗️STOP LOSS : 12$
+
+by @CRR""", Signal("SNX", [11.4], [11.3, 11.255, 11.205, 11.12], 12))
+
+
+class TestBVIP(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            BVIP, """CVCUSDT LONG 0.324-0.30
+Targets 0.348-0.365
+Leverage 4x
+Stop 0.292
+
+by @CRR""", Signal("CVC", [0.324, 0.3], [0.348, 0.365], 0.292, leverage=4))
+
+    def test_2(self):
+        self._assert_signal(
+            BVIP, """LTCUSDT LONG 182-176
+Targets 186-191-196-205
+Leverage 15x
+stop 162
+
+by @CRR""", Signal("LTC", [182, 176], [186, 191, 196, 205], 162, leverage=15))
+
+
+class TestFXVIP(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            FXVIP, """Binance Future
+OCEANUSDT ❗️LONG
+Entry Price       0,582800
+Leverage :  cross (×20)
+Target :  0,592709
+Stop loss :  0,57137
+Capital invested :  2%
+
+by @CRR""", Signal("OCEAN", [0.5828], [0.592709], 0.57137, 0.02, 20))
+
+    def test_2(self):
+        self.assertRaises(
+            Exception,
+            self._assert_signal,
+            FXVIP, """#ICP/USDT #LONG
+(BINANCE FUTURES )
+BUY : 82$- 88.2$
+
+TAKE PROFIT:
+TARGET 1 : 93.00$
+TARGET 2 : 95.50$
+TARGET 3 : 98.00$
+TARGET 4 : 101.0$
+TARGET 5 : 104.0$
+TARGET 6 : 108.0$
+
+❗️STOP LOSS :80$
+
+Use 2% Fund Only ❗️
+
+LEV :  10X-20X (CROSS)
+
+BUY & HOLD ✅
+
+by @CRR""", None)
+
+    def test_3(self):
+        self.assertRaises(
+            Exception,
+            self._assert_signal,
+            FXVIP, """HNT/USDT ️ Long above 14.024
+Targets: 14.074 - 14.129- 14.199 - 14.31 - 14.6
+Leverage 10x
+Stop 13.324
+
+by @CRR""", None)
+
+
+class TestBAW(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            BAW, """Long ETH/USDT
+
+Entry 2475 / 2425
+
+Targets 2526 / 2571 / 2613 / 2675 / 2731
+
+Stop loss : 2290
+
+Leverage cross x8
+
+Exchange : Binance Futures
+
+by @CRR""", Signal("ETH", [2475, 2425], [2526, 2571, 2613, 2675, 2731], 2290))

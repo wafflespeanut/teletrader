@@ -20,7 +20,6 @@ WAIT_ORDER_EXPIRY = 24 * 60 * 60
 NEW_ORDER_TIMEOUT = 5 * 60
 ORDER_WATCH_INTERVAL = 5 * 60
 MAX_TARGETS = 5
-SIGNAL_SYMBOL_TTL = 20 * 60
 
 
 class OrderType:
@@ -92,7 +91,7 @@ class FuturesTrader:
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.order_queue = asyncio.Queue()
-        self.sig_cache = TTLCache(maxsize=100, ttl=20)
+        self.sig_cache = TTLCache(maxsize=100, ttl=300)
         self.balance = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
@@ -140,7 +139,7 @@ class FuturesTrader:
                     await self._cancel_order(oid, order["sym"])
                 quantity = 0
                 for tid, q in zip(order["t_ord"], order["t_q"]):
-                    if self.state["orders"].get(tid):
+                    if not self.state["orders"].get(tid, {}).get("filled"):
                         quantity += q
                 try:
                     if quantity == 0:
@@ -280,8 +279,10 @@ class FuturesTrader:
                 quantity *= 0.5
                 # NOTE: Don't close position (as it'll affect other orders)
                 if i == len(targets) - 1:
-                    quantity = remaining
-                tgt_order_id = self._create_target_order(
+                    quantity = self._round_qty(odata["sym"], remaining)
+                else:
+                    quantity = self._round_qty(odata["sym"], quantity)
+                tgt_order_id = await self._create_target_order(
                     order_id, odata["sym"], odata["side"], tgt, quantity)
                 if tgt_order_id is None:
                     continue
@@ -293,7 +294,7 @@ class FuturesTrader:
                 }
                 remaining -= quantity
 
-    async def _create_target_order(self, order_id, symbol, side, tgt_price, quantity):
+    async def _create_target_order(self, order_id, symbol, side, tgt_price, rounded_qty):
         tgt_order_id = OrderID.target()
         params = {
             "symbol": symbol,
@@ -303,7 +304,7 @@ class FuturesTrader:
             "side": "SELL" if side == "BUY" else "BUY",
             "newClientOrderId": tgt_order_id,
             "price": self._round_price(symbol, tgt_price),
-            "quantity": self._round_qty(symbol, quantity),
+            "quantity": rounded_qty,
         }
         try:
             resp = await self.client.futures_create_order(**params)
@@ -428,6 +429,7 @@ class FuturesTrader:
                     if isinstance(err, BinanceAPIException) and err.code == -2021:  # price is around SL now
                         logging.info(f"Placing market order for parent {parent_id} "
                                      "after attempt to create SL order", color="yellow")
+                        params.pop("stopPrice")
                         params["type"] = OrderType.MARKET
 
     async def _watch_orders(self):
@@ -469,11 +471,11 @@ class FuturesTrader:
         async with self.olock:
             resp = await self.client.futures_account()
             for pos in resp["positions"]:
-                side = pos["positionSide"]
-                if side == "BOTH":
+                amount, side = float(pos["positionAmt"]), pos["positionSide"]
+                if side == "BOTH" or amount == 0:
                     continue
-                k = pos["symbol"] + side
-                pos[k] = pos["positionAmt"]
+                positions[pos["symbol"] + side] = amount
+            logging.info(f"Current positions: {positions}")
             resp = await self.client.futures_get_open_orders()
             for order in resp:
                 open_orders[order["clientOrderId"]] = order
@@ -487,6 +489,10 @@ class FuturesTrader:
 
             removed = []
             for oid, odata in list(self.state["orders"].items()):
+                if (OrderID.is_target(oid) or OrderID.is_stop_loss(oid)):
+                    if self.state["orders"].get(odata["parent"]) is None:
+                        logging.warning(f"Order {oid} is now an orphan. Flagging for removal")
+                        removed.append(oid)
                 if not (OrderID.is_wait(oid) or OrderID.is_market(oid)):
                     continue
                 if open_orders.get(oid) is not None:  # only filled orders
@@ -496,8 +502,9 @@ class FuturesTrader:
                 if odata.get("s_ord") is None:  # must have stop loss order
                     continue
                 side = "LONG" if odata["side"] == "BUY" else "SHORT"
-                if not pos.get(odata["sym"] + side):
-                    removed += odata["t_ord"] + [oid, odata["s_ord"]]
+                if not positions.get(odata["sym"] + side):
+                    logging.warning(f"Order {oid} missing in open positions. Flagging for removal")
+                    removed.append(oid)
                     continue
                 children = [odata["s_ord"]] + odata["t_ord"]
                 for cid in children:
@@ -536,11 +543,21 @@ class FuturesTrader:
                             "filled": False,
                         }
                 if order_hit[0] or all(order_hit[1:]):  # All TPs or SL hit
-                    removed += odata["t_ord"] + [oid, odata["s_ord"]]
+                    removed.append(oid)
 
             for oid in removed:
                 logging.warning(f"Removing outdated order {oid}", color="yellow")
-                self.state["orders"].pop(oid, None)
+                parent = self.state["orders"].pop(oid, None)
+                if not (OrderID.is_wait(oid) or OrderID.is_market(oid)):
+                    continue
+                if parent is None:
+                    continue
+                sym = parent["sym"]
+                for cid in [parent["s_ord"]] + parent["t_ord"]:
+                    logging.warning(f"Removing outdated child {cid}", color="yellow")
+                    c = self.state["orders"].pop(cid, None)
+                    if c and not c["filled"]:
+                        await self._cancel_order(cid, sym)
 
             for o in sl_orders:
                 oid = o["id"]
@@ -623,7 +640,7 @@ class FuturesTrader:
             self.sig_cache.pop(self._cache_key(signal), None)
 
     def _cache_key(self, signal: Signal):
-        return f"{signal.coin}_{signal.tag}_{'long' if signal.is_long else 'short'}"
+        return f"{signal.coin}_{signal.entries[0]}_{signal.targets[0]}"  # coin and targets for filter
 
     # MARK: Rouding for min quantity and min price for symbols
 
