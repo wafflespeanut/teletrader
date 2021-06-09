@@ -2,7 +2,7 @@ import unittest
 
 from .errors import CloseTradeException
 from .signal import (BAW, BFP, BPS, BUSA, BVIP, CB, CCS, CEP, CM, EBS, FWP, FXVIP,
-                     KBV, MCVIP, MVIP, PBF, PTS, RM, TCA, VIPCS, WB, Signal)
+                     KBV, MCVIP, MVIP, PBF, CS, RM, TCA, VIPCS, WB, Signal)
 
 
 class TestSignal(unittest.TestCase):
@@ -235,7 +235,7 @@ Leverage ×10
 
 Stop Targets:
 
-1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 0.03, 10))
+1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 0.02, 10))
 
     def test_2(self):
         self._assert_signal(
@@ -252,7 +252,7 @@ Take-Profit Targets:
 Levrage ×50
 
 Stop Targets:
-1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 0.03, 50))
+1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 0.02, 10))
 
     def test_3(self):
         self.assertRaises(
@@ -287,7 +287,7 @@ Take-Profit Targets:
 Leverage : ×50
 
 Stop Targets:
-1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 0.03, 50))
+1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 0.02, 10))
 
     def test_5(self):
         self.assertRaises(AssertionError, self._assert_signal, MVIP, """[In reply to 👑 MVIP 👑]
@@ -327,7 +327,7 @@ Take-Profit Targets:
 Leverage ×10
 
 Stop Targets:
-1) 21.4""", Signal("LINK", [22.7, 22.8], [23.2, 23.7, 24.1]))
+1) 21.4""", Signal("LINK", [0], []))
 
 
 class TestTCA(TestSignal):
@@ -488,6 +488,22 @@ Close TRB""", None)
             coin = exp.coin
         self.assertEqual(coin, "TRB")
 
+    def test_4(self):
+        self._assert_signal(
+            VIPCS, """➡️ SHORT BTCUSDT | Binance
+
+❇️ Entry : 36700.00000000
+
+☑️ Target 1: 31195.00000000 (15%)
+
+☑️ Target 2: 25690.00000000 (30%)
+
+☑️ Target 3: 20185.00000000 (45%)
+
+⛔️ Stoploss: 42205.00000000  (-15%)
+
+💫 Leverage : 5x - 10x""", Signal("BTC", [36700], [31195, 25690, 20185], 42205, 0.05))
+
 
 class TestCEP(TestSignal):
     def test_1(self):
@@ -539,10 +555,10 @@ https://www.tradingview.com/""", Signal("LTC", [162, 165], [168, 173, 179, 183, 
         )
 
 
-class TestPTS(TestSignal):
+class TestCS(TestSignal):
     def test_1(self):
         self._assert_signal(
-            PTS, """Binance Futures  Call ‼️
+            CS, """Binance Futures  Call ‼️
 
 #ANKRUSDT  PERP
 ⬆️Long  Call
@@ -601,6 +617,16 @@ Target 2 : 1.4$
 Target 3 : 1.6$
 
 Enjoy!!""", Signal("SFP", [1.185, 1.19], [1.25, 1.4, 1.6]))
+
+    def test_4(self):
+        self._assert_signal(
+            BUSA, """$BNB Short Entry : 366$ - 368$ x10 😎
+
+Target : 345$ - 340$
+
+SL : 378$
+
+Enjoy!!""", Signal("SFP", [366, 368], [345, 340], 378))
 
 
 class TestEBS(TestSignal):
@@ -674,6 +700,23 @@ Leverage - 10x
 ❗️STOP LOSS : 12$
 
 by @CRR""", Signal("SNX", [11.4], [11.3, 11.255, 11.205, 11.12], 12))
+
+    def test_3(self):
+        self._assert_signal(
+            KBV, """#B&BF
+
+#BZRX/USDT ️
+#LONG
+BUY LIMIT: 3000
+
+SELL:
+3012 - 3024 - 3036 - 3060 - 3120
+
+Leverage - 10x
+
+❗️STOP LOSS : 2850.
+
+by @CryptoRROFFICAIL""", Signal("BZRX", [3000], [3012, 3024, 3036, 3060, 3120], 2850))
 
 
 class TestBVIP(TestSignal):

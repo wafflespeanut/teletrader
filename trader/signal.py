@@ -296,6 +296,26 @@ class CM:
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
+class CS:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "binance futures" in text
+        t = []
+        c, er, sl = [None] * 3
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "target" in line:
+                t.append(extract_numbers(line)[-1])
+            if "stop loss" in line:
+                sl = extract_optional_number(line)
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
 class EBS:
     @classmethod
     def parse(cls, text: str) -> Signal:
@@ -361,7 +381,7 @@ class KBV:
             res = extract_symbol(line)
             if res:
                 c = res[1]
-            if "entry" in line:
+            if "entry" in line or "buy" in line:
                 er = extract_numbers(line)
             if "sell" in line:
                 t = extract_numbers(lines[i + 1])
@@ -410,7 +430,8 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+        # Shitty channel with less quality and awfully high leverage
+        return Signal(c, er, t, sl, fraction=0.02, leverage=min(lv, 10), tag=cls.__name__)
 
 
 class PBF:
@@ -431,26 +452,6 @@ class PBF:
                 sl = extract_optional_number(line.replace(",", "."))
         assert c and er and t
         return Signal(c, er, t, sl, fraction=0.02, leverage=20, tag=cls.__name__)
-
-
-class PTS:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "binance futures" in text
-        t = []
-        c, er, sl = [None] * 3
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line)
-            if res:
-                c = res[1]
-            if "entry" in line:
-                er = extract_numbers(line)
-            if "target" in line:
-                t.append(extract_numbers(line)[-1])
-            if "stop loss" in line:
-                sl = extract_optional_number(line)
-        assert c and er and sl and t
-        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class RM:
@@ -528,9 +529,9 @@ class VIPCS:
             res = extract_symbol(line, prefix=("#" if "⚡" in line else None))
             if res:
                 c = res[1]
-            if "buy" in line:
+            if "buy" in line or "entry" in line:
                 e = extract_optional_number(line)
-            elif "entry target" in line:
+            if "entry target" in line:
                 e = extract_numbers(lines[i + 1])[-1]
             if "take-profit target" in line:
                 j = i + 1
@@ -591,7 +592,7 @@ CHANNELS = {
     -1001245250001: KBV,
     -1001330855662: MCVIP,
     -1001196181927: MVIP,
-    -1001147998012: PTS,
+    -1001147998012: CS,
     -1001422693443: RM,
     -1001274400840: RM,
     -1001239897393: TCA,

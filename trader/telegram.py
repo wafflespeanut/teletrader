@@ -4,7 +4,7 @@ from telethon.tl.custom import Message
 from . import FuturesTrader
 from .errors import CloseTradeException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import Signal
+from .signal import CHANNELS, Signal
 
 
 class TeleTrader(TelegramClient):
@@ -34,8 +34,10 @@ class TeleTrader(TelegramClient):
             await self.disconnect()
 
     async def _handler(self, event: Message):
-        sig = None
+        sig, tag = None, None
         try:
+            if CHANNELS.get(event.chat_id):
+                tag = CHANNELS[event.chat_id].__name__
             sig = Signal.parse(event.chat_id, event.text)
         except CloseTradeException as err:
             coin = err.coin
@@ -49,9 +51,9 @@ class TeleTrader(TelegramClient):
                     return
             await self.trader.close_trades(err.tag, coin)
         except AssertionError:
-            logging.info("Ignoring message as requirements are not met", color="white")
+            logging.info(f"Ignoring message from {tag} as requirements are not met", color="white")
         except Exception:
-            logging.exception(f"Ignoring message {event.text} due to parse failure")
+            logging.exception(f"Ignoring message from {tag} {event.text} due to parse failure")
 
         if sig is None:
             return
