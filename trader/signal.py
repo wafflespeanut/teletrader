@@ -340,21 +340,14 @@ class FWP:
 class FXVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert "binance future" in text
-        assert "leverage" in text
-        c, er, t, sl = [None] * 4
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, prefix=None)
-            if res:
-                c = res[1]
-            if "entry" in line:
-                er = extract_numbers(line.replace(",", "."))
-            if "target" in line:
-                t = extract_numbers(line.replace(",", "."))
-            if "stop loss" in line:
-                sl = extract_optional_number(line.replace(",", "."))
-        assert c and er and sl and t
-        return Signal(c, er, t, sl, fraction=0.02, leverage=20, tag=cls.__name__)
+        for ch in [CCS, FWP, MCVIP, PBF]:
+            try:
+                sig = ch.parse(text)
+                sig.tag = cls.__name__
+                return sig
+            except Exception:
+                pass
+        raise AssertionError
 
 
 class KBV:
@@ -418,6 +411,26 @@ class MVIP:
                 sl = float(n[-1])
         assert c and er and sl and lv and t
         return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+
+
+class PBF:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "binance future" in text
+        assert "leverage" in text
+        c, er, t, sl = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line.replace(",", "."))
+            if "target" in line:
+                t = extract_numbers(line.replace(",", "."))
+            if "stop loss" in line:
+                sl = extract_optional_number(line.replace(",", "."))
+        assert c and er and t
+        return Signal(c, er, t, sl, fraction=0.02, leverage=20, tag=cls.__name__)
 
 
 class PTS:
@@ -503,6 +516,10 @@ class TCA:
 class VIPCS:
     @classmethod
     def parse(cls, text: str) -> Signal:
+        if "close " in text:
+            coin = text.split("\n")[-1].split(" ")[-1]
+            raise CloseTradeException(cls.__name__, coin)
+
         t = []
         c, e, sl = [None] * 3
         assert "leverage" in text
@@ -569,7 +586,7 @@ CHANNELS = {
     -1001332814834: EBS,
     -1001304374569: FWP,
     -1001342941479: FXVIP,
-    -1001342941479: FXVIP,
+    -1001368285182: PBF,
     -1001361758531: FWP,
     -1001245250001: KBV,
     -1001330855662: MCVIP,

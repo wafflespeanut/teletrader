@@ -18,7 +18,7 @@ from .utils import NamedLock
 
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
 NEW_ORDER_TIMEOUT = 5 * 60
-ORDER_WATCH_INTERVAL = 5 * 60
+ORDER_WATCH_INTERVAL = 2 * 60
 MAX_TARGETS = 5
 
 
@@ -91,6 +91,7 @@ class FuturesTrader:
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.order_queue = asyncio.Queue()
+        # cache to disallow orders with same symbol, entry and first TP for 5 mins
         self.sig_cache = TTLCache(maxsize=100, ttl=300)
         self.balance = 0
 
@@ -175,14 +176,14 @@ class FuturesTrader:
                 async def _process(signal):
                     # Process one order at a time for each symbol
                     async with self.clocks.lock(signal.coin):
+                        registered = await self._register_order_for_signal(signal)
+                        if not registered:
+                            logging.info(f"Ignoring signal from {signal.tag} because order exists "
+                                         f"for {signal.coin}", color="yellow")
+                            return
                         for i in range(3):
                             try:
-                                registered = await self._register_order_for_signal(signal)
-                                if registered:
-                                    await self._place_order(signal)
-                                else:
-                                    logging.info(f"Ignoring signal from {signal.tag} because order exists "
-                                                 f"for {signal.coin}", color="yellow")
+                                await self._place_order(signal)
                                 return
                             except PriceUnavailableException:
                                 logging.info(f"Price unavailable for {signal.coin}", color="red")
@@ -190,11 +191,10 @@ class FuturesTrader:
                                 logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
                             except Exception as err:
                                 logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
-                                await self._unregister_order(signal)  # unknown error - don't block future signals
-                                return
+                                break  # unknown error - don't block future signals
                             if i < 2:
                                 await asyncio.sleep(5)
-                                await self._unregister_order(signal)
+                        await self._unregister_order(signal)
 
                 asyncio.ensure_future(_process(signal))
 
@@ -475,11 +475,10 @@ class FuturesTrader:
                 if side == "BOTH" or amount == 0:
                     continue
                 positions[pos["symbol"] + side] = amount
-            logging.info(f"Current positions: {positions}")
             resp = await self.client.futures_get_open_orders()
             for order in resp:
                 open_orders[order["clientOrderId"]] = order
-            logging.info(f"Checking {len(open_orders)} orders for {len(positions)} positions...")
+            logging.info(f"Checking {len(open_orders)} orders for {len(positions)} positions: {positions}")
             for oid, order in open_orders.items():
                 odata = self.state["orders"].get(oid)
                 if OrderID.is_market(oid) or OrderID.is_wait(oid):

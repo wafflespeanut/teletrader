@@ -2,7 +2,7 @@ import unittest
 
 from .errors import CloseTradeException
 from .signal import (BAW, BFP, BPS, BUSA, BVIP, CB, CCS, CEP, CM, EBS, FWP, FXVIP,
-                     KBV, MCVIP, MVIP, PTS, RM, TCA, VIPCS, WB, Signal)
+                     KBV, MCVIP, MVIP, PBF, PTS, RM, TCA, VIPCS, WB, Signal)
 
 
 class TestSignal(unittest.TestCase):
@@ -478,6 +478,16 @@ Stop Targets:
 
 Published By: @V""", Signal("LINK", [27], [24, 21.6, 18.9, 14, 11], 29.7, 0.05))
 
+    def test_3(self):
+        coin = None
+        try:
+            self._assert_signal(
+                VIPCS, """[In reply to Vip CoinSignals]
+Close TRB""", None)
+        except CloseTradeException as exp:
+            coin = exp.coin
+        self.assertEqual(coin, "TRB")
+
 
 class TestCEP(TestSignal):
     def test_1(self):
@@ -686,10 +696,10 @@ stop 162
 by @CRR""", Signal("LTC", [182, 176], [186, 191, 196, 205], 162, leverage=15))
 
 
-class TestFXVIP(TestSignal):
+class TestPBF(TestSignal):
     def test_1(self):
         self._assert_signal(
-            FXVIP, """Binance Future
+            PBF, """Binance Future
 OCEANUSDT ❗️LONG
 Entry Price       0,582800
 Leverage :  cross (×20)
@@ -699,10 +709,22 @@ Capital invested :  2%
 
 by @CRR""", Signal("OCEAN", [0.5828], [0.592709], 0.57137, 0.02, 20))
 
+
+class TestFXVIP(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            FXVIP, """Binance Future
+DGBUSDT ❗️LONG
+Entry Price       0,062400
+Leverage :  cross (×20)
+Target :  0,063649
+Stop loss :  UPDATE
+Capital invested :  2%
+
+by @CRR""", Signal("DGB", [0.0624], [0.063649], None, 0.02, 20))
+
     def test_2(self):
-        self.assertRaises(
-            Exception,
-            self._assert_signal,
+        self._assert_signal(
             FXVIP, """#ICP/USDT #LONG
 (BINANCE FUTURES )
 BUY : 82$- 88.2$
@@ -723,18 +745,30 @@ LEV :  10X-20X (CROSS)
 
 BUY & HOLD ✅
 
-by @CRR""", None)
+by @CRR""", Signal("ICP", [82, 88.2], [93, 95.5, 98, 101, 104], 80, 0.02, 20))
 
     def test_3(self):
-        self.assertRaises(
-            Exception,
-            self._assert_signal,
+        self._assert_signal(
             FXVIP, """HNT/USDT ️ Long above 14.024
 Targets: 14.074 - 14.129- 14.199 - 14.31 - 14.6
 Leverage 10x
 Stop 13.324
 
-by @CRR""", None)
+by @CRR""", Signal("HNT", [14.024], [14.074, 14.129, 14.199, 14.31, 14.6], 13.324, 0.04))
+
+    def test_4(self):
+        self._assert_signal(
+            FXVIP, """📊 FUTURES (BINANCE)
+
+#BELUSDT
+
+LONG Below : 1.65
+
+MAX 👉5x-7x LEVERAGE Hold
+
+TAKE PROFIT: 1.70|1.76|1.85+
+
+by @CRR""", Signal("BEL", [1.65], [1.7, 1.76, 1.85], None))
 
 
 class TestBAW(TestSignal):
