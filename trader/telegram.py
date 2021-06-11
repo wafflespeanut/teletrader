@@ -46,8 +46,11 @@ class TeleTrader(TelegramClient):
                 try:
                     parent = Signal.parse(event.chat_id, reply.text)
                     coin = parent.coin
+                except AssertionError:
+                    logging.info(f"Ignoring previous message from {tag} as requirements are not met", color="white")
+                    return
                 except Exception:
-                    logging.exception(f"Unable to parse previous message {reply.text} as signal")
+                    logging.exception(f"Unable to parse previous message >>> {reply.text} <<< as signal")
                     return
             await self.trader.close_trades(err.tag, coin)
         except AssertionError:

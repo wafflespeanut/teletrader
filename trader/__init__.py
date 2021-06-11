@@ -276,12 +276,14 @@ class FuturesTrader:
             targets = odata["tgt"][:MAX_TARGETS]
             remaining = quantity = odata["qty"]
             for i, tgt in enumerate(targets):
-                quantity *= 0.5
+                quantity *= 0.35
                 # NOTE: Don't close position (as it'll affect other orders)
                 if i == len(targets) - 1:
                     quantity = self._round_qty(odata["sym"], remaining)
                 else:
                     quantity = self._round_qty(odata["sym"], quantity)
+                if quantity <= 0:
+                    continue
                 tgt_order_id = await self._create_target_order(
                     order_id, odata["sym"], odata["side"], tgt, quantity)
                 if tgt_order_id is None:
@@ -511,7 +513,7 @@ class FuturesTrader:
                         continue
                     is_filled = False
                     try:
-                        cdata = await self.client.get_order(
+                        cdata = await self.client.futures_get_order(
                             symbol=odata["sym"], origClientOrderId=cid)
                         is_filled = cdata["status"] == "FILLED"
                     except Exception as err:
