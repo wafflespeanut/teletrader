@@ -80,6 +80,34 @@ class OrderID:
         return i.startswith(cls.PrefixTarget)
 
 
+class Trade:
+    @classmethod
+    def entry(cls, tag, coin, entry, quantity, leverage, side):
+        fund = quantity * entry / leverage
+        return (f"📣 {tag}: {side} {quantity} {coin} x{leverage} @ ${entry}\n"
+                f"💰 ${round(fund, 2)}")
+
+    @classmethod
+    def target(cls, tag, coin, entry, q_entry, leverage, target, q_target, is_long, is_sl=False):
+        side = "SELL" if is_long else "BUY"
+        initial = q_target * entry
+        final = q_target * target
+        profit = final - initial
+        if not is_long:
+            profit = -profit
+        percent = profit / (initial / leverage)
+        if profit > 0:
+            s = "🤑"
+            msg = f"✅ Profits: ${round(profit, 2)} ({round(percent * 100, 2)}%)"
+        elif is_sl and q_target < q_entry:
+            s = "⚠️"
+            msg = "🟠 Stopped at entry after taking profits"
+        else:
+            s = "‼️"
+            msg = f"🛑 Loss: ${round(profit, 2)} ({round(percent * 100, 2)}%)"
+        return (f"{s} {tag}: {side} {q_target} {coin} x{leverage}\n{msg}")
+
+
 class FuturesTrader:
     def __init__(self):
         self.client: AsyncClient = None
@@ -94,6 +122,7 @@ class FuturesTrader:
         # cache to disallow orders with same symbol, entry and first TP for 5 mins
         self.sig_cache = TTLCache(maxsize=100, ttl=300)
         self.balance = 0
+        self.results_handler = None
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
         self.state = state
@@ -269,6 +298,8 @@ class FuturesTrader:
         await self._place_sl_order(order_id)
         async with self.olock:
             odata = self.state["orders"][order_id]
+            await self.results_handler(Trade.entry(
+                odata["tag"], odata["sym"], odata["ent"], odata["qty"], odata["lev"], odata["side"]))
             if odata.get("t_ord"):
                 logging.warning(f"TP order(s) already exist for parent {order_id}")
                 return
@@ -276,7 +307,7 @@ class FuturesTrader:
             targets = odata["tgt"][:MAX_TARGETS]
             remaining = quantity = odata["qty"]
             for i, tgt in enumerate(targets):
-                quantity *= 0.35
+                quantity *= 0.5
                 # NOTE: Don't close position (as it'll affect other orders)
                 if i == len(targets) - 1:
                     quantity = self._round_qty(odata["sym"], remaining)
@@ -366,6 +397,10 @@ class FuturesTrader:
                         for oid in parent["t_ord"]:
                             self.state["orders"].pop(oid, None)  # It might not exist
                             await self._cancel_order(oid, parent["sym"])
+                        await self.results_handler(
+                            Trade.target(parent["tag"], parent["sym"], parent["ent"], parent["qty"],
+                                         parent["lev"], float(info["ap"]), float(info["q"]),
+                                         is_long=parent["side"] == "BUY", is_sl=True))
                 elif OrderID.is_target(order_id):
                     logging.info(f"TP order {order_id} hit.", color="green")
                     await self._move_stop_loss(order_id)
@@ -383,7 +418,14 @@ class FuturesTrader:
                 logging.warning(f"Couldn't find TP order {tp_id} in parent {parent}, closing trade", color="red")
                 await self.close_trades(parent["tag"], parent["sym"].replace("USDT", ""))
                 return
-            elif tp_id == targets[-1]:
+
+            idx = targets.index(tp_id)
+            await self.results_handler(
+                Trade.target(parent["tag"], parent["sym"], parent["ent"], parent["qty"],
+                             parent["lev"], parent["tgt"][idx], parent["t_q"][idx],
+                             is_long=parent["side"] == "BUY"))
+
+            if tp_id == targets[-1]:
                 logging.info(f"All TP orders hit. Removing parent {parent}")
                 parent = self.state["orders"].pop(tp["parent"])
                 for oid in parent["t_ord"]:
@@ -392,7 +434,6 @@ class FuturesTrader:
                 await self._cancel_order(parent["s_ord"], parent["sym"])
                 return
             else:
-                idx = targets.index(tp_id)
                 new_price, quantity = parent["ent"], sum(parent["t_q"][(idx + 1):])
 
         await self._place_sl_order(tp["parent"], new_price, quantity)
@@ -627,12 +668,6 @@ class FuturesTrader:
             key = self._cache_key(signal)
             if self.sig_cache.get(key) is not None:
                 return False
-            for odata in self.state["orders"].values():
-                # Check whether a matching order exists and is live
-                if odata.get("sym") != f"{signal.coin}USDT":
-                    continue
-                if odata.get("parent") is not None or odata.get("s_ord") is None:
-                    continue
             self.sig_cache[key] = ()
             return True
 

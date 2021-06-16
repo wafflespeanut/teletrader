@@ -1112,7 +1112,7 @@ Targets :
 
 Stop loss 🔴 2364
 
-by @CRR""", Signal("ETH", [2420], [2470, 2515, 2580, 2650], 2364, 0.02, 5))
+by @CRR""", Signal("ETH", [2420], [2470, 2515, 2580, 2650], 2364, 0.01, 5))
 
     def test_2(self):
         self._assert_signal(RWS, """⚡️⚡️ #ETH/USDT ⚡️⚡️
@@ -1136,7 +1136,7 @@ Stop Targets:
 
 Published By: @Adam
 
-by @CRR""", Signal("ETH", [2370], [2310, 2275, 2210, 2110, 1990], 2411))
+by @CRR""", Signal("ETH", [2370], [2310, 2275, 2210, 2110, 1990], 2411, 0.02))
 
     def test_3(self):
         coin = None

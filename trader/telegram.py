@@ -7,10 +7,14 @@ from .logger import DEFAULT_LOGGER as logging
 from .signal import CHANNELS, Signal
 
 
+RESULTS_CHANNEL = -1001271281417
+
+
 class TeleTrader(TelegramClient):
     def __init__(self, api_id, api_hash, session=None, state={}, loop=None):
         self.state = state
         self.trader = FuturesTrader()
+        self.trader.results_handler = self._post_result
         super().__init__(session, api_id, api_hash, loop=loop)
         if session is None:
             logging.info("Setting test server")
@@ -32,6 +36,12 @@ class TeleTrader(TelegramClient):
             await self.run_until_disconnected()
         finally:
             await self.disconnect()
+
+    async def _post_result(self, message: str):
+        try:
+            await self.send_message(RESULTS_CHANNEL, message)
+        except Exception:
+            logging.exception("Failed to send result")
 
     async def _handler(self, event: Message):
         sig, tag = None, None

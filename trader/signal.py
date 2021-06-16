@@ -472,6 +472,9 @@ class FXVIP:
                 sig = ch.parse(text)
                 sig.tag = cls.__name__
                 return sig
+            except CloseTradeException as err:
+                err.tag = cls.__name__
+                raise err
             except Exception:
                 pass
 
@@ -501,6 +504,9 @@ class HBTCV:
             assert "✅" not in text
             sig.tag = cls.__name__
             return sig
+        except CloseTradeException as err:
+            err.tag = cls.__name__
+            raise err
         except Exception:
             pass
 
@@ -661,7 +667,7 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, fraction=0.01, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, fraction=0.005, leverage=lv, tag=cls.__name__)
 
 
 class PBF:
@@ -726,6 +732,9 @@ class RWS:
             sig = RM.parse(text)
             sig.tag = cls.__name__
             return sig
+        except CloseTradeException as err:
+            err.tag = cls.__name__
+            raise err
         except Exception:
             pass
 
@@ -744,7 +753,7 @@ class RWS:
                 lev = extract_optional_number(line)
                 lev = int(lev) if lev else None
         assert c and er and t and sl
-        return Signal(c, er, t, sl, leverage=lev, tag=cls.__name__)
+        return Signal(c, er, t, sl, fraction=0.01, leverage=lev, tag=cls.__name__)
 
 
 class SLVIP:
