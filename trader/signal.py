@@ -23,23 +23,20 @@ def extract_optional_number(line: str):
 
 class Signal:
     MIN_PRECISION = 6
-    DEFAULT_FRACTION = 0.02
     MIN_LEVERAGE = 5
     DEFAULT_LEVERAGE = 10
-    SAFE_LEVERAGE = 20
-    DEFAULT_STOP = 0.12
-    RISK_STOP = 0.06
+    DEFAULT_STOP = 0.06
+    DEFAULT_RISK = 0.01
 
-    def __init__(self, coin, entries, targets, sl=None, fraction=None, leverage=None, tag=None):
+    def __init__(self, coin, entries, targets, sl=None, leverage=None, risk=None, tag=None):
         self.coin = coin.upper()
         self.entries = sorted(entries)
         self.sl = sl
         self.targets = targets
-        self.fraction = fraction if fraction else self.DEFAULT_FRACTION
-        self.leverage = min(max(leverage if leverage else self.DEFAULT_LEVERAGE,
-                                self.MIN_LEVERAGE),
-                            self.SAFE_LEVERAGE)
+        self.leverage = max(leverage if leverage else self.DEFAULT_LEVERAGE, self.MIN_LEVERAGE)
         self.tag = tag
+        self.fraction = 0
+        self.risk = risk if risk else self.DEFAULT_RISK
         prev = self.entries[0]
         for t in self.targets:
             assert (t > prev if self.is_long else t < prev)
@@ -78,12 +75,15 @@ class Signal:
         else:
             self.entry = self.entries[-1] if self.is_long else self.entries[0]
         if self.sl is None:
-            stop_percent = self.RISK_STOP if self.leverage > self.DEFAULT_LEVERAGE else self.DEFAULT_STOP
-            self.sl = (self.entry * (1 - stop_percent)) if self.is_long else (
-                self.entry * (1 + stop_percent))
-            logging.warning(f"Setting {self.sl} as stop loss for {self.coin}: {self.entry} - {stop_percent * 100}%")
+            self.sl = (self.entry * (1 - self.DEFAULT_STOP)) if self.is_long else (
+                self.entry * (1 + self.DEFAULT_STOP))
+            logging.warning(f"Setting {self.sl} as stop loss for {self.coin}: "
+                            f"{self.entry} - {self.DEFAULT_STOP * 100}%")
         else:
             self.sl *= self._factor(self.sl, price)
+        percent = self.entry / self.sl
+        percent = percent - 1 if self.is_long else 1 - percent
+        self.fraction = self.risk / (percent * self.leverage)
 
     def _factor(self, sig_p, mark_p):
         # Fix for prices which are human-readable at times when we'll find lack of some precision
@@ -100,7 +100,7 @@ class Signal:
         return factor
 
     def __repr__(self):
-        return (f"{self.tag}: {self.coin} x{self.leverage} ({self.fraction * 100}%, "
+        return (f"{self.tag}: {self.coin} x{self.leverage} ({round(self.fraction * 100, 2)}%, "
                 f"e: {self.entries}, sl: {self.sl}, targets: {self.targets})")
 
 
@@ -370,7 +370,7 @@ class CEP:
             if "stoploss" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t[:5], sl, fraction=0.02, leverage=20, tag=cls.__name__)
+        return Signal(c, er, t[:5], sl, leverage=20, tag=cls.__name__)
 
 
 class CM:
@@ -614,7 +614,7 @@ class LVIP:
             res = extract_symbol(line)
             if res:
                 c = res[1]
-            if "buy" in line:
+            if "buy" in line and "fund" not in line:
                 er = extract_numbers(line.replace(",", "."))
             if "target" in line:
                 t = extract_numbers(line.replace(",", "."))
@@ -667,7 +667,7 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, fraction=0.005, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class PBF:
@@ -713,7 +713,7 @@ class PVIP:
             if "stop" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, fraction=0.04, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class RM(HBTCV):
@@ -753,7 +753,7 @@ class RWS:
                 lev = extract_optional_number(line)
                 lev = int(lev) if lev else None
         assert c and er and t and sl
-        return Signal(c, er, t, sl, fraction=0.01, leverage=lev, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lev, tag=cls.__name__)
 
 
 class SLVIP:
@@ -868,7 +868,7 @@ class VIPCS:
             elif "stop target" in line:
                 sl = extract_numbers(lines[i + 1])[-1]
         assert c and e and t and sl
-        return Signal(c, [e], t, sl, fraction=0.03, tag=cls.__name__)
+        return Signal(c, [e], t, sl, tag=cls.__name__)
 
 
 class WB:
@@ -906,7 +906,7 @@ class YCP:
             if "stop-loss" in line:
                 sl = extract_numbers(line)[0]
         assert c and er and t and sl
-        return Signal(c, er, t, sl, fraction=0.03, leverage=5, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=5, tag=cls.__name__)
 
 
 CHANNELS = {

@@ -2,7 +2,6 @@ import asyncio
 import math
 import json
 import uuid
-import re
 import time
 import traceback
 
@@ -10,7 +9,7 @@ from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache
 
-from .errors import EntryCrossedException, PriceUnavailableException
+from .errors import EntryCrossedException, InsufficientQuantityException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
 from .signal import Signal
 from .user_stream import UserStream
@@ -19,6 +18,7 @@ from .utils import NamedLock
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
 NEW_ORDER_TIMEOUT = 5 * 60
 ORDER_WATCH_INTERVAL = 2 * 60
+PRICE_SLIPPAGE = 1.5  # skip order if funds allocated exceeds estimation by this much
 MAX_TARGETS = 5
 
 
@@ -98,14 +98,14 @@ class Trade:
         percent = profit / (initial / leverage)
         if profit > 0:
             s = "🤑"
-            msg = f"✅ Profits: ${round(profit, 2)} ({round(percent * 100, 2)}%)"
+            msg = f"✅ Profits: ${round(profit, 3)} ({round(percent * 100, 2)}%)"
         elif is_sl and q_target < q_entry:
             s = "⚠️"
             msg = "🟠 Stopped at entry after taking profits"
         else:
             s = "‼️"
-            msg = f"🛑 Loss: ${round(profit, 2)} ({round(percent * 100, 2)}%)"
-        return (f"{s} {tag}: {side} {q_target} {coin} x{leverage}\n{msg}")
+            msg = f"🛑 Loss: ${round(profit, 3)} ({round(percent * 100, 2)}%)"
+        return (f"{s} {tag}: {side} {q_target} {coin} x{leverage} @ {target}\n{msg}")
 
 
 class FuturesTrader:
@@ -198,7 +198,7 @@ class FuturesTrader:
             logging.info("Waiting for orders to be queued...")
             while True:
                 signal = await self.order_queue.get()
-                if not re.search(r"^[A-Z0-9]+$", signal.coin):
+                if self.symbols.get(f"{signal.coin}USDT") is None:
                     logging.info(f"Unknown symbol {signal.coin} in signal", color="yellow")
                     continue
 
@@ -210,7 +210,7 @@ class FuturesTrader:
                             logging.info(f"Ignoring signal from {signal.tag} because order exists "
                                          f"for {signal.coin}", color="yellow")
                             return
-                        for i in range(3):
+                        for i in range(10):
                             try:
                                 await self._place_order(signal)
                                 return
@@ -218,11 +218,16 @@ class FuturesTrader:
                                 logging.info(f"Price unavailable for {signal.coin}", color="red")
                             except EntryCrossedException as err:
                                 logging.info(f"Price went too fast ({err.price}) for signal {signal}", color="yellow")
+                            except InsufficientQuantityException as err:
+                                logging.info(
+                                    f"Allocated ${round(err.alloc_funds, 2)} for {err.alloc_q} {signal.coin} "
+                                    f"but requires ${round(err.est_funds, 2)} for {err.est_q} {signal.coin}",
+                                    color="red")
                             except Exception as err:
                                 logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
                                 break  # unknown error - don't block future signals
                             if i < 2:
-                                await asyncio.sleep(5)
+                                await asyncio.sleep(6)
                         await self._unregister_order(signal)
 
                 asyncio.ensure_future(_process(signal))
@@ -243,9 +248,14 @@ class FuturesTrader:
         logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
         await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
         price = self.prices[signal.coin]
-        quantity = (self.balance * signal.fraction) / (price / signal.leverage)
         signal.correct(price)
+        alloc_funds = self.balance * signal.fraction
+        quantity = alloc_funds / (price / signal.leverage)
         logging.info(f"Corrected signal: {signal}", color="cyan")
+        qty = self._round_qty(symbol, quantity)
+        est_funds = qty * signal.entry / signal.leverage
+        if (est_funds / alloc_funds) > PRICE_SLIPPAGE:
+            raise InsufficientQuantityException(quantity, alloc_funds, qty, est_funds)
 
         order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
         params = {
@@ -253,7 +263,7 @@ class FuturesTrader:
             "positionSide": "LONG" if signal.is_long else "SHORT",
             "side": "BUY" if signal.is_long else "SELL",
             "type": OrderType.MARKET,
-            "quantity": self._round_qty(symbol, quantity),
+            "quantity": qty,
             "newClientOrderId": order_id,
         }
 
@@ -279,7 +289,7 @@ class FuturesTrader:
                     "ent": signal.entry if signal.wait_entry else price,
                     "sl": signal.sl,
                     "tgt": signal.targets,
-                    "frc": signal.fraction,
+                    "fnd": alloc_funds,
                     "lev": signal.leverage,
                     "tag": signal.tag,
                     "crt": int(time.time()),
