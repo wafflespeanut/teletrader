@@ -18,6 +18,8 @@ from .utils import NamedLock
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
 NEW_ORDER_TIMEOUT = 5 * 60
 ORDER_WATCH_INTERVAL = 2 * 60
+ORDER_MAX_RETRIES = 10
+ORDER_RETRY_SLEEP = 5
 PRICE_SLIPPAGE = 1.5  # skip order if funds allocated exceeds estimation by this much
 MAX_TARGETS = 5
 
@@ -84,7 +86,7 @@ class Trade:
     @classmethod
     def entry(cls, tag, coin, entry, quantity, leverage, side):
         fund = quantity * entry / leverage
-        return (f"📣 {tag}: {side} {quantity} {coin} x{leverage} @ ${entry}\n"
+        return (f"📣 {tag}: {side} {quantity} {coin} x{leverage} @ ${round(entry, 5)}\n"
                 f"💰 ${round(fund, 2)}")
 
     @classmethod
@@ -105,7 +107,7 @@ class Trade:
         else:
             s = "‼️"
             msg = f"🛑 Loss: ${round(profit, 3)} ({round(percent * 100, 2)}%)"
-        return (f"{s} {tag}: {side} {q_target} {coin} x{leverage} @ {target}\n{msg}")
+        return (f"{s} {tag}: {side} {q_target} {coin} x{leverage} @ {round(target, 5)}\n{msg}")
 
 
 class FuturesTrader:
@@ -119,8 +121,8 @@ class FuturesTrader:
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.order_queue = asyncio.Queue()
-        # cache to disallow orders with same symbol, entry and first TP for 5 mins
-        self.sig_cache = TTLCache(maxsize=100, ttl=300)
+        # cache to disallow orders with same symbol, entry and first TP for 10 mins
+        self.sig_cache = TTLCache(maxsize=100, ttl=600)
         self.balance = 0
         self.results_handler = None
 
@@ -172,7 +174,7 @@ class FuturesTrader:
                     if not self.state["orders"].get(tid, {}).get("filled"):
                         quantity += q
                 try:
-                    if quantity == 0:
+                    if quantity > 0:
                         resp = await self.client.futures_create_order(
                             symbol=order["sym"],
                             positionSide="LONG" if order["side"] == "BUY" else "SHORT",
@@ -185,9 +187,9 @@ class FuturesTrader:
                             symbol=order["sym"],
                             origClientOrderId=order_id,
                         )
-                    logging.info(f"Closed position for {order}, resp: {resp}", color="yellow")
+                    logging.info(f"Closed position for order {order}, resp: {resp}", color="yellow")
                 except Exception as err:
-                    logging.error(f"Failed to close position for {order_id}, err: {err}")
+                    logging.error(f"Failed to close position for order {order}, err: {err}")
             for oid in removed:
                 self.state["orders"].pop(oid, None)
             if not removed:
@@ -210,7 +212,7 @@ class FuturesTrader:
                             logging.info(f"Ignoring signal from {signal.tag} because order exists "
                                          f"for {signal.coin}", color="yellow")
                             return
-                        for i in range(10):
+                        for i in range(ORDER_MAX_RETRIES):
                             try:
                                 await self._place_order(signal)
                                 return
@@ -226,8 +228,8 @@ class FuturesTrader:
                             except Exception as err:
                                 logging.error(f"Failed to place order: {traceback.format_exc()} {err}")
                                 break  # unknown error - don't block future signals
-                            if i < 2:
-                                await asyncio.sleep(6)
+                            if i < ORDER_MAX_RETRIES - 1:
+                                await asyncio.sleep(ORDER_RETRY_SLEEP)
                         await self._unregister_order(signal)
 
                 asyncio.ensure_future(_process(signal))
@@ -323,8 +325,6 @@ class FuturesTrader:
                     quantity = self._round_qty(odata["sym"], remaining)
                 else:
                     quantity = self._round_qty(odata["sym"], quantity)
-                if quantity <= 0:
-                    continue
                 tgt_order_id = await self._create_target_order(
                     order_id, odata["sym"], odata["side"], tgt, quantity)
                 if tgt_order_id is None:
@@ -488,7 +488,10 @@ class FuturesTrader:
     async def _watch_orders(self):
         async def _watcher():
             while True:
-                open_symbols = await self._expire_outdated_orders_and_get_open_symbols()
+                try:
+                    open_symbols = await self._expire_outdated_orders_and_get_open_symbols()
+                except Exception as err:
+                    logging.exception(f"Failed to expire outdated orders: {err}")
                 async with self.slock:
                     redundant = set(self.state["streams"]).difference(open_symbols)
                     if redundant:
@@ -686,7 +689,7 @@ class FuturesTrader:
             self.sig_cache.pop(self._cache_key(signal), None)
 
     def _cache_key(self, signal: Signal):
-        return f"{signal.coin}_{signal.entries[0]}_{signal.targets[0]}"  # coin and targets for filter
+        return f"{signal.coin}_{signal.targets[0]}"  # coin and first target for filter
 
     # MARK: Rouding for min quantity and min price for symbols
 

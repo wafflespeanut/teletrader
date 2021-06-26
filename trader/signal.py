@@ -25,10 +25,10 @@ class Signal:
     MIN_PRECISION = 6
     MIN_LEVERAGE = 5
     DEFAULT_LEVERAGE = 10
-    DEFAULT_STOP = 0.06
+    DEFAULT_STOP = 0.08
     DEFAULT_RISK = 0.01
 
-    def __init__(self, coin, entries, targets, sl=None, leverage=None, risk=None, tag=None):
+    def __init__(self, coin, entries, targets, sl=None, leverage=None, risk_factor=1, tag=None):
         self.coin = coin.upper()
         self.entries = sorted(entries)
         self.sl = sl
@@ -36,7 +36,7 @@ class Signal:
         self.leverage = max(leverage if leverage else self.DEFAULT_LEVERAGE, self.MIN_LEVERAGE)
         self.tag = tag
         self.fraction = 0
-        self.risk = risk if risk else self.DEFAULT_RISK
+        self.risk = self.DEFAULT_RISK * risk_factor
         prev = self.entries[0]
         for t in self.targets:
             assert (t > prev if self.is_long else t < prev)
@@ -66,9 +66,9 @@ class Signal:
         return self.entry + (self.targets[0] - self.entry) * 0.2
 
     def correct(self, price):
-        self.entries = list(map(lambda i: i * self._factor(i, price), self.entries))
+        self.entries = list(map(lambda i: i * self.factor(i, price), self.entries))
         self.entries.sort()
-        self.targets = list(map(lambda i: i * self._factor(i, price), self.targets))
+        self.targets = list(map(lambda i: i * self.factor(i, price), self.targets))
         self.wait_entry = (self.is_long and price < self.entries[0]) or (self.is_short and price > self.entries[-1])
         if self.wait_entry:
             self.entry = self.entries[0] if self.is_long else self.entries[-1]
@@ -80,12 +80,12 @@ class Signal:
             logging.warning(f"Setting {self.sl} as stop loss for {self.coin}: "
                             f"{self.entry} - {self.DEFAULT_STOP * 100}%")
         else:
-            self.sl *= self._factor(self.sl, price)
+            self.sl *= self.factor(self.sl, price)
         percent = self.entry / self.sl
         percent = percent - 1 if self.is_long else 1 - percent
         self.fraction = self.risk / (percent * self.leverage)
 
-    def _factor(self, sig_p, mark_p):
+    def factor(self, sig_p, mark_p):
         # Fix for prices which are human-readable at times when we'll find lack of some precision
         minima = math.inf
         factor = 1
@@ -155,14 +155,37 @@ class BFP2:
             if res:
                 c = res[1]
                 e = extract_optional_number(line.split("usdt")[-1])
+            if "buy" in line:
+                e = extract_optional_number(line.split("usdt")[-1])
             if "target" in line:
                 t = extract_numbers(line)
             if "stop loss" in line:
                 sl = extract_optional_number(line)
             if "leverage" in line:
-                lv = int(extract_numbers(line)[-1])
+                lv = extract_numbers(line) or None
+                if lv:
+                    lv = int(lv[-1])
         assert c and e and sl and t
         return Signal(c, [e], t, sl, leverage=lv, tag=cls.__name__)
+
+
+class BFS:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "leverage" in text
+        c, e, sl, t = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line)
+            if res:
+                c = res[1]
+            if "short" in line or "long" in line:
+                e = extract_optional_number(line)
+            if "take profit" in line:
+                t = extract_numbers(line)
+            if "stoploss" in line:
+                sl = extract_optional_number(line)
+        assert c and e and sl and t
+        return Signal(c, [e], t, sl, tag=cls.__name__)
 
 
 class BPS:
@@ -192,10 +215,29 @@ class BPS:
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
+class BSS:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "open short" in text or "open long" in text
+        c, er, t, sl = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, suffix=None)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "target" in line:
+                t = extract_numbers(line)
+            if "stoploss" in line:
+                sl = extract_optional_number(line)
+        assert c and er and t and sl
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
 class BUSA:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert re.search(r"/usdt x[0-9]+", text)
+        assert re.search(r"/usdt ((x[0-9]+)|([0-9]+x))", text)
         t = []
         c, er, sl = [None] * 3
         for line in map(str.strip, text.split("\n")):
@@ -358,7 +400,7 @@ class CEP:
     def parse(cls, text: str) -> Signal:
         assert "leverage" in text
         c, er, sl, t = [None] * 4
-        lines = list(map(str.strip, text.replace("\n\n", "\n").split("\n")))
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
@@ -390,7 +432,7 @@ class CM:
             if "stop loss" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, tag=cls.__name__)
+        return Signal(c, er, t, sl, risk_factor=0.5, tag=cls.__name__)
 
 
 class CS(CM):
@@ -405,7 +447,8 @@ class CY:
             raise CloseTradeException(cls.__name__, res[1])
 
         assert "leverage" in text
-        c, er, sl, t = [None] * 4
+        t = []
+        c, er, sl = [None] * 3
         for line in map(str.strip, text.split("\n")):
             res = extract_symbol(line, prefix=None)
             if res:
@@ -414,6 +457,10 @@ class CY:
                 er = extract_numbers(line)
             if "sell" in line:
                 t = extract_numbers(line)
+            if "target" in line:
+                res = extract_numbers(line)
+                if len(res) > 1:
+                    t.append(res[-1])
             if "stop" in line:
                 sl = extract_optional_number(line)
             if "leverage" in line:
@@ -429,7 +476,7 @@ class EBS:
         assert "leverage" in text
         t = []
         c, e, lev = [None] * 3
-        lines = list(map(str.strip, text.replace("\n\n", "\n").split("\n")))
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
@@ -441,7 +488,7 @@ class EBS:
             if "target" in line:
                 t.append(extract_numbers(line)[-1])
         assert c and e and t and lev
-        return Signal(c, [e], t, leverage=lev, tag=cls.__name__)
+        return Signal(c, [e], t, leverage=lev, risk_factor=0.5, tag=cls.__name__)
 
 
 class FWP:
@@ -493,7 +540,7 @@ class FXVIP:
             if "leverage" in line:
                 lv = int(extract_numbers(line)[-1])
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.5, tag=cls.__name__)
 
 
 class HBTCV:
@@ -513,7 +560,7 @@ class HBTCV:
         assert "binance futures" in text
         t, er = [], []
         c, sl, lv = [None] * 3
-        lines = list(map(str.strip, text.replace("\n\n", "\n").split("\n")))
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
@@ -645,7 +692,7 @@ class MVIP:
         assert "levrage" in text or "leverage" in text
         t = []
         c, er, sl, lv = [None] * 4
-        lines = list(map(str.strip, text.replace("\n\n", "\n").split("\n")))
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             if "⚡️" in line:
                 line = line.replace(" ", "")
@@ -667,7 +714,7 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.2, tag=cls.__name__)
 
 
 class PBF:
@@ -713,7 +760,7 @@ class PVIP:
             if "stop" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.5, tag=cls.__name__)
 
 
 class RM(HBTCV):
@@ -759,17 +806,17 @@ class RWS:
 class SLVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert "binance futures" in text
+        assert "binance futures" in text or "open short" in text or "open long" in text
         c, er, t, sl, lv = [None] * 5
         for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, suffix="_usdt")
+            res = extract_symbol(line, suffix="_usdt" if "_usdt" in line else "/usdt")
             if res:
                 c = res[1]
-            if "entry zone" in line:
+            if "entry zone" in line or "open short" in line or "open long" in line:
                 er = extract_numbers(line)
-            if "sell zone" in line:
+            if "sell zone" in line or "target" in line:
                 t = extract_numbers(line)
-            if "stoploss" in line:
+            if "stop" in line:
                 sl = extract_numbers(line)[-1]
             if "lev" in line:
                 lv = int(extract_numbers(line)[-1])
@@ -912,8 +959,12 @@ class YCP:
 CHANNELS = {
     -1001293741800: BAW,
     -1001418856446: BFP,
+    -1001447775833: BFP2,
+    -1001145827997: BFS,
     -1001397582022: BPS,
     -1001273049293: BPS,
+    -1001365009067: BSS,
+    -1001262300473: BUSA,
     -1001276380825: BVIP,
     -1001190501437: C,
     -1001298917999: CB,
@@ -937,7 +988,7 @@ CHANNELS = {
     -1001214337237: KSP,
     -1001332251855: LVIP,
     -1001330855662: MCVIP,
-    -1001196181927: MVIP,
+    # -1001196181927: MVIP,
     -1001368285182: PBF,
     -1001436013269: PHVIP,
     -1001309017279: PVIP,

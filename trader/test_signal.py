@@ -1,7 +1,7 @@
 import unittest
 
 from .errors import CloseTradeException
-from .signal import (BAW, BFP, BFP2, BPS, BUSA, BVIP, C, CB, CC, CCC, CCS, CEP, CM, CS, CY, EBS, FWP, FXVIP,
+from .signal import (BAW, BFP, BFP2, BFS, BPS, BSS, BUSA, BVIP, C, CB, CC, CCC, CCS, CEP, CM, CS, CY, EBS, FWP, FXVIP,
                      HBTCV, KBV, KCE, KSP, LVIP, MCVIP, MVIP, PBF, PHVIP, PVIP, RM, RWS, SLVIP, SS, TCA, VIPBB,
                      VIPCS, WB, YCP, Signal)
 
@@ -14,6 +14,7 @@ class TestSignal(unittest.TestCase):
         self.assertEqual(s.sl, sig.sl)
         self.assertEqual(s.targets, sig.targets)
         self.assertEqual(s.leverage, sig.leverage)
+        self.assertEqual(s.risk, sig.risk)
         self.assertEqual(s.tag, cls.__name__)
 
 
@@ -241,7 +242,7 @@ Leverage ×10
 
 Stop Targets:
 
-1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 10))
+1) 312,80""", Signal("BNB", [390.5, 391], [394.91, 410.55, 430.10], 312.8, 10, 0.2))
 
     def test_2(self):
         self._assert_signal(
@@ -258,7 +259,7 @@ Take-Profit Targets:
 Levrage ×50
 
 Stop Targets:
-1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 50))
+1) 1.400""", Signal("CTK", [1.5, 1.501], [1.56, 1.65, 1.75], 1.4, 50, 0.2))
 
     def test_3(self):
         self.assertRaises(
@@ -293,7 +294,7 @@ Take-Profit Targets:
 Leverage : ×50
 
 Stop Targets:
-1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 50))
+1) 170""", Signal("LTC", [174, 175], [176, 178], 170, 50, 0.2))
 
     def test_5(self):
         self.assertRaises(AssertionError, self._assert_signal, MVIP, """[In reply to 👑 MVIP 👑]
@@ -349,7 +350,25 @@ Take-Profit Targets:
 Leverage×50
 
 Stop Targets:
-1) 55.29""", Signal("ETC", [58.1, 58.2], [58.78, 59.36, 59.94], 55.29, 50))
+1) 55.29""", Signal("ETC", [58.1, 58.2], [58.78, 59.36, 59.94], 55.29, 50, 0.2))
+
+    def test_10(self):
+        self._assert_signal(MVIP, """⚡️⚡️ #MKR/USDT⚡️⚡️
+
+Entry Zone:
+
+ 2308  - 2310
+
+Take-Profit Targets:
+
+1) 2356
+2) 2402
+3) 2448
+
+Leverage ×20
+
+Stop Targets:
+1) 2194""", Signal("MKR", [2308, 2310], [2356, 2402, 2448], 2194, 20, 0.2))
 
 
 class TestTCA(TestSignal):
@@ -572,7 +591,7 @@ Target 5 : 193$
 Use Only 2-5% Of Your Total Portfolio
 
 
-https://www.tradingview.com/""", Signal("LTC", [162, 165], [168, 173, 179, 183, 193], 159)
+https://www.tradingview.com/""", Signal("LTC", [162, 165], [168, 173, 179, 183, 193], 159, risk_factor=0.5)
         )
 
 
@@ -598,7 +617,7 @@ Target 5 : 0.21$
 Use Only 2-5% Of Your Total Portfolio
 
 https://www.tradingview.com/""",
-            Signal("ANKR", [0.10352, 0.10745], [0.10951, 0.12, 0.15, 0.18, 0.21], 0.10164)
+            Signal("ANKR", [0.10352, 0.10745], [0.10951, 0.12, 0.15, 0.18, 0.21], 0.10164, risk_factor=0.5)
         )
 
 
@@ -638,6 +657,19 @@ Target 3 : 1.6$
 
 Enjoy!!""", Signal("SFP", [1.185, 1.19], [1.25, 1.4, 1.6]))
 
+    def test_4(self):
+        self._assert_signal(
+            BUSA, """[ Photo ]
+A good signal : RUNE/USDT 10x.
+
+Entry : 7.6$ - 7.62$
+
+Target 1 : 8.5$
+Target 2: 9$
+Target 3 : 9.5$
+
+6.8$ can be stop out""", Signal("RUNE", [7.6, 7.62], [8.5, 9, 9.5], 6.8))
+
 #     def test_4(self):
 #         self._assert_signal(
 #             BUSA, """$BNB Short Entry : 366$ - 368$ x10 😎
@@ -665,7 +697,7 @@ Short Entry:
 Target 1 - 2666.48
 Target 2 - 2648.69
 
-by @CRR""", Signal("ETH", [2679], [2666.48, 2648.69], leverage=50))
+by @CRR""", Signal("ETH", [2679], [2666.48, 2648.69], leverage=50, risk_factor=0.5))
 
     def test_2(self):
         self._assert_signal(
@@ -682,7 +714,7 @@ Short Entry:
 Target 1 - 35959
 Target 2 - 35672
 
-by @CTT""", Signal("BTC", [36160], [35959, 35672], leverage=32))
+by @CTT""", Signal("BTC", [36160], [35959, 35672], leverage=32, risk_factor=0.5))
 
 
 class TestKBV(TestSignal):
@@ -845,7 +877,7 @@ STOP LOSS 254
 
 LEVERAGE 3–10X
 
-by @CRR""", Signal("AAVE", [305, 285], [395, 450, 530], 254, leverage=10))
+by @CRR""", Signal("AAVE", [305, 285], [395, 450, 530], 254, leverage=10, risk_factor=0.5))
 
 
 class TestBAW(TestSignal):
@@ -1034,6 +1066,16 @@ by @CRR""", None)
             coin = exp.coin
         self.assertEqual(coin, "DOGE")
 
+    def test_4(self):
+        self._assert_signal(CY, """ALICE/USDT
+Leverage 20X
+Buy   3.90 to 4.05
+Target 1  4.20
+Target 2.  4.50
+Stop  3.75
+
+by @CRR""", Signal("ALICE", [3.9, 4.05], [4.2, 4.5], 3.75, 20))
+
 
 class TestKCE(TestSignal):
     def test_1(self):
@@ -1179,6 +1221,26 @@ Exchange : Binance Futures
 
 by @CRR""", Signal("BNB", [350, 320], [353, 357, 365, 380, 400], 300, 75))
 
+    def test_2(self):
+        self._assert_signal(
+            SLVIP, """[ Photo ]
+https://www.tradingview.com/
+
+#BTC/USDT Open small Short postion here ‼️
+
+OPEN SHORT:- 33760-33890-34090
+
+STOP 🛑 :- 34800
+
+TARGET:-33600-33500-33300-33000-32700-32500-32100-31800-31700 BELOW ‼️
+
+LEV :- 2X/3X
+
+USE 2% FUND ‼️‼️
+
+by @CRR""", Signal("BTC", [33760, 33890, 34090],
+                   [33600, 33500, 33300, 33000, 32700, 32500, 32100, 31800, 31700], 34800, 5))
+
 
 class TestCCC(TestSignal):
     def test_1(self):
@@ -1285,6 +1347,16 @@ Leverage Use Only 3x-5x ✈️
 
 by @CRR""", Signal("1INCH", [0.007], [0.0077, 0.0085, 0.0099], 0.0055, leverage=5))
 
+    def test_2(self):
+        self._assert_signal(BFP2, """Risky Signal For Leverage Traders
+#ICPUSDT Long/Buy Oportunity
+Buy Below Only $29.00
+Target $30.50-$31.70-$33.00-$35.00+
+Stop Loss Use Must $28.00
+Leverage Use Only 3x-5x Maximum
+
+by @CRR""", Signal("ICP", [29], [30.5, 31.7, 33, 35], 28, 5))
+
 
 class TestVIPBB(TestSignal):
     def test_1(self):
@@ -1340,7 +1412,7 @@ Stop-loss: 2300$
 
 Use 5-6% Balance)
 
-by @CRR""", Signal("ETH", [2460, 2480], [2600, 2780, 2900], 2300, 5))
+by @CRR""", Signal("ETH", [2460, 2480], [2600, 2780, 2900], 2300, 5, 0.5))
 
 
 class TestPHVIP(TestSignal):
@@ -1483,3 +1555,37 @@ STOP 🛑:- 14.09
 SWING CALL BUY WITH 5% Fund and HOLD IT.. you can buy also in spot
 
 by @CRR""", Signal("AVAX", [15.05, 15.15, 15.372], [15.69, 15.9, 16.2, 16.7, 17.2], 14.09, 5))
+
+
+class TestBSS(TestSignal):
+    def test_1(self):
+        self._assert_signal(BSS, """Open Long
+
+#BCH
+
+Entry 520 ~ 525
+
+Target 535 540 545 555 560
+
+Stoploss  465
+
+@BinanceSignalsSpecial""", Signal("BCH", [520, 525], [535, 540, 545, 555, 560], 465))
+
+
+class TestBFS(TestSignal):
+    def test_1(self):
+        self._assert_signal(
+            BFS, """#AAVEUSDT
+
+Short : Below 205.27
+
+Leverage : 10x
+
+Take Profit : 204.66 - 203.63 - 202.6 - 201.37 - 199.73
+
+StopLoss : 220.07
+
+Signal by @BSF
+
+⚠️ Don't buy early. Open position when the market price touches the ENTRY POINT ⚠️""",
+            Signal("AAVE", [205.27], [204.66, 203.63, 202.6, 201.37, 199.73], 220.07))
