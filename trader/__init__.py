@@ -109,6 +109,10 @@ class Trade:
             msg = f"🛑 Loss: ${round(profit, 3)} ({round(percent * 100, 2)}%)"
         return (f"{s} {tag}: {side} {q_target} {coin} x{leverage} @ {round(target, 5)}\n{msg}")
 
+    @classmethod
+    def skipped(cls, tag, side, coin):
+        return f"⏩ Skipped {tag}: {side} {coin} after multiple attempts"
+
 
 class FuturesTrader:
     def __init__(self):
@@ -153,9 +157,9 @@ class FuturesTrader:
 
     async def close_trades(self, tag, coin=None):
         if coin is None:
-            logging.info(f"Attempting to close all trades associated with channel {tag}", color="yellow")
+            logging.info(f"Attempting to close all trades tagged {tag}", color="yellow")
         else:
-            logging.info(f"Attempting to close {coin} trades associated with channel {tag}", color="yellow")
+            logging.info(f"Attempting to close {coin} trades tagged {tag}", color="yellow")
         async with self.olock:
             removed = []
             for order_id, order in self.state["orders"].items():
@@ -166,6 +170,7 @@ class FuturesTrader:
                 children = [] + order["t_ord"]
                 if order.get("s_ord"):
                     children.append(order["s_ord"])
+                removed.append(order_id)
                 removed += children
                 for oid in children:
                     await self._cancel_order(oid, order["sym"])
@@ -231,6 +236,8 @@ class FuturesTrader:
                             if i < ORDER_MAX_RETRIES - 1:
                                 await asyncio.sleep(ORDER_RETRY_SLEEP)
                         await self._unregister_order(signal)
+                        await self.results_handler(Trade.skipped(
+                            signal.tag, "BUY" if signal.is_long else "SELL", signal.coin))
 
                 asyncio.ensure_future(_process(signal))
 
@@ -259,7 +266,7 @@ class FuturesTrader:
         if (est_funds / alloc_funds) > PRICE_SLIPPAGE:
             raise InsufficientQuantityException(quantity, alloc_funds, qty, est_funds)
 
-        order_id = OrderID.wait() if signal.wait_entry else OrderID.market()
+        order_id = OrderID.wait() if (signal.force_limit_order or signal.wait_entry) else OrderID.market()
         params = {
             "symbol": symbol,
             "positionSide": "LONG" if signal.is_long else "SHORT",
@@ -269,10 +276,13 @@ class FuturesTrader:
             "newClientOrderId": order_id,
         }
 
-        if (signal.is_long and price > signal.max_entry) or (signal.is_short and price < signal.max_entry):
-            raise EntryCrossedException(price)
-
-        if signal.wait_entry:
+        if signal.force_limit_order and \
+                ((signal.is_long and price > signal.entry) or (signal.is_short and price < signal.entry)):
+            logging.info(f"Placing limit order for {signal.coin} (price @ {price}, entry @ {signal.entry})")
+            params["type"] = OrderType.LIMIT
+            params["price"] = self._round_price(symbol, signal.entry)
+            params["timeInForce"] = "GTC"
+        elif signal.force_limit_order or signal.wait_entry:
             logging.info(f"Placing stop limit order for {signal.coin} (price @ {price}, entry @ {signal.entry})")
             params["type"] = OrderType.STOP
             params["stopPrice"] = self._round_price(symbol, signal.entry)
@@ -288,7 +298,7 @@ class FuturesTrader:
                     "qty": float(resp["origQty"]),
                     "sym": symbol,
                     "side": params["side"],
-                    "ent": signal.entry if signal.wait_entry else price,
+                    "ent": signal.entry if (signal.force_limit_order or signal.wait_entry) else price,
                     "sl": signal.sl,
                     "tgt": signal.targets,
                     "fnd": alloc_funds,

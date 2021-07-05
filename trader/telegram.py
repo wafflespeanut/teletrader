@@ -4,10 +4,7 @@ from telethon.tl.custom import Message
 from . import FuturesTrader
 from .errors import CloseTradeException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import CHANNELS, Signal
-
-
-RESULTS_CHANNEL = -1001271281417
+from .signal import CHANNELS, Signal, RESULTS_CHANNEL
 
 
 class TeleTrader(TelegramClient):
