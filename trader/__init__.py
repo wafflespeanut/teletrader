@@ -21,7 +21,8 @@ ORDER_WATCH_INTERVAL = 2 * 60
 ORDER_MAX_RETRIES = 10
 ORDER_RETRY_SLEEP = 5
 PRICE_SLIPPAGE = 1.5  # skip order if funds allocated exceeds estimation by this much
-MAX_TARGETS = 5
+MAX_TARGETS = 10
+DEFAULT_RR = 1
 
 
 class OrderType:
@@ -84,10 +85,11 @@ class OrderID:
 
 class Trade:
     @classmethod
-    def entry(cls, tag, coin, entry, quantity, leverage, side):
+    def entry(cls, tag, coin, entry, quantity, leverage, side, sl, rr):
         fund = quantity * entry / leverage
+        risk = abs(quantity * entry - quantity * sl)
         return (f"📣 {tag}: {side} {quantity} {coin} x{leverage} @ ${round(entry, 5)}\n"
-                f"💰 ${round(fund, 2)}")
+                f"💰 ${round(fund, 2)} (risk: ${round(risk, 2)}, rr: {round(rr, 2)})")
 
     @classmethod
     def target(cls, tag, coin, entry, q_entry, leverage, target, q_target, is_long, is_sl=False):
@@ -113,6 +115,10 @@ class Trade:
     def skipped(cls, tag, side, coin):
         return f"⏩ Skipped {tag}: {side} {coin} after multiple attempts"
 
+    @classmethod
+    def low_rr(cls, tag, side, coin, rr):
+        return f"⏩ Skipped {tag}: {side} {coin} because of low risk-reward: ({round(rr, 2)})"
+
 
 class FuturesTrader:
     def __init__(self):
@@ -129,6 +135,7 @@ class FuturesTrader:
         self.sig_cache = TTLCache(maxsize=100, ttl=600)
         self.balance = 0
         self.results_handler = None
+        self.ocount = 0
 
     async def init(self, api_key, api_secret, state={}, test=False, loop=None):
         self.state = state
@@ -163,7 +170,10 @@ class FuturesTrader:
         async with self.olock:
             removed = []
             for order_id, order in self.state["orders"].items():
-                if order.get("tag") != tag:
+                otag = order.get("tag")
+                if not otag:
+                    continue
+                if otag.split("-")[0] != tag:
                     continue
                 if coin is not None and order["sym"] != f"{coin}USDT":
                     continue
@@ -209,7 +219,17 @@ class FuturesTrader:
                     logging.info(f"Unknown symbol {signal.coin} in signal", color="yellow")
                     continue
 
+                if signal.tag:
+                    signal.tag += f"-{self.ocount}"
+                else:
+                    signal.tag = f"{signal.coin.lower()}-{self.ocount}"
+                self.ocount += 1
+
                 async def _process(signal):
+                    if signal.is_partial:
+                        await self._place_partial_order(signal)
+                        return
+
                     # Process one order at a time for each symbol
                     async with self.clocks.lock(signal.coin):
                         registered = await self._register_order_for_signal(signal)
@@ -243,6 +263,12 @@ class FuturesTrader:
 
         asyncio.ensure_future(_gatherer())
 
+    async def _place_partial_order(self, signal: Signal):
+        symbol = f"{signal.coin}USDT"
+        f = self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
+        asyncio.ensure_future(f)  # async change leverage
+        # TODO
+
     async def _place_order(self, signal: Signal):
         await self._subscribe_futures(signal.coin)
         for _ in range(10):
@@ -253,11 +279,17 @@ class FuturesTrader:
         if self.prices.get(signal.coin) is None:
             raise PriceUnavailableException()
 
-        symbol = f"{signal.coin}USDT"
-        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
-        await self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
         price = self.prices[signal.coin]
         signal.correct(price)
+        side = "BUY" if signal.is_long else "SELL"
+        if signal.risk_reward < self.state["config"].get("rr", DEFAULT_RR):
+            await self.results_handler(Trade.low_rr(signal.tag, side, signal.coin, signal.risk_reward))
+            return
+
+        symbol = f"{signal.coin}USDT"
+        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
+        f = self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
+        asyncio.ensure_future(f)  # async change leverage
         alloc_funds = self.balance * signal.fraction
         quantity = alloc_funds / (price / signal.leverage)
         logging.info(f"Corrected signal: {signal}", color="cyan")
@@ -266,18 +298,19 @@ class FuturesTrader:
         if (est_funds / alloc_funds) > PRICE_SLIPPAGE:
             raise InsufficientQuantityException(quantity, alloc_funds, qty, est_funds)
 
-        order_id = OrderID.wait() if (signal.force_limit_order or signal.wait_entry) else OrderID.market()
+        order_id = OrderID.wait()
         params = {
             "symbol": symbol,
             "positionSide": "LONG" if signal.is_long else "SHORT",
-            "side": "BUY" if signal.is_long else "SELL",
+            "side": side,
             "type": OrderType.MARKET,
-            "quantity": qty,
             "newClientOrderId": order_id,
+            "quantity": qty,
         }
 
-        if signal.force_limit_order and \
-                ((signal.is_long and price > signal.entry) or (signal.is_short and price < signal.entry)):
+        if (signal.force_limit_order and
+            ((signal.is_long and price > signal.entry) or (signal.is_short and price < signal.entry))) or \
+                ((signal.is_long and price > signal.max_entry) or (signal.is_short and price < signal.max_entry)):
             logging.info(f"Placing limit order for {signal.coin} (price @ {price}, entry @ {signal.entry})")
             params["type"] = OrderType.LIMIT
             params["price"] = self._round_price(symbol, signal.entry)
@@ -288,6 +321,7 @@ class FuturesTrader:
             params["stopPrice"] = self._round_price(symbol, signal.entry)
             params["price"] = self._round_price(symbol, signal.max_entry)
         else:
+            params["newClientOrderId"] = order_id = OrderID.market()
             logging.info(f"Placing market order for {signal.coin} (price @ {price}, entry @ {signal.entry}")
 
         async with self.olock:  # Lock only for interacting with orders
@@ -301,6 +335,7 @@ class FuturesTrader:
                     "ent": signal.entry if (signal.force_limit_order or signal.wait_entry) else price,
                     "sl": signal.sl,
                     "tgt": signal.targets,
+                    "rr": signal.risk_reward,
                     "fnd": alloc_funds,
                     "lev": signal.leverage,
                     "tag": signal.tag,
@@ -321,20 +356,21 @@ class FuturesTrader:
         async with self.olock:
             odata = self.state["orders"][order_id]
             await self.results_handler(Trade.entry(
-                odata["tag"], odata["sym"], odata["ent"], odata["qty"], odata["lev"], odata["side"]))
+                odata["tag"], odata["sym"], odata["ent"], odata["qty"],
+                odata["lev"], odata["side"], odata["sl"], odata["rr"]))
             if odata.get("t_ord"):
                 logging.warning(f"TP order(s) already exist for parent {order_id}")
                 return
 
             targets = odata["tgt"][:MAX_TARGETS]
-            remaining = quantity = odata["qty"]
+            remaining = odata["qty"]
             for i, tgt in enumerate(targets):
-                quantity *= 0.5
+                quantity = (odata["qty"] * 0.8) / len(targets)
+                # NOTE: Leaving 20% for moon/gulag
+                # if i == len(targets) - 1:
+                #     quantity = remaining
+                quantity = self._round_qty(odata["sym"], quantity)
                 # NOTE: Don't close position (as it'll affect other orders)
-                if i == len(targets) - 1:
-                    quantity = self._round_qty(odata["sym"], remaining)
-                else:
-                    quantity = self._round_qty(odata["sym"], quantity)
                 tgt_order_id = await self._create_target_order(
                     order_id, odata["sym"], odata["side"], tgt, quantity)
                 if tgt_order_id is None:
@@ -445,16 +481,14 @@ class FuturesTrader:
                              parent["lev"], parent["tgt"][idx], parent["t_q"][idx],
                              is_long=parent["side"] == "BUY"))
 
+            new_price = parent["ent"]  # SL to entry
+            quantity = parent["qty"] - sum(parent["t_q"])  # allocated for moon
             if tp_id == targets[-1]:
-                logging.info(f"All TP orders hit. Removing parent {parent}")
-                parent = self.state["orders"].pop(tp["parent"])
+                logging.info(f"All TP orders hit for parent {parent}")
                 for oid in parent["t_ord"]:
                     self.state["orders"].pop(oid, None)  # It might not exist
-                self.state["orders"].pop(parent["s_ord"])
-                await self._cancel_order(parent["s_ord"], parent["sym"])
-                return
             else:
-                new_price, quantity = parent["ent"], sum(parent["t_q"][(idx + 1):])
+                quantity += sum(parent["t_q"][(idx + 1):])
 
         await self._place_sl_order(tp["parent"], new_price, quantity)
 
@@ -608,7 +642,9 @@ class FuturesTrader:
                             "filled": False,
                         }
                 if order_hit[0] or all(order_hit[1:]):  # All TPs or SL hit
-                    removed.append(oid)
+                    if positions.get(f"{odata['symbol']} {odata['positionSide']}") is None:
+                        # Make sure position is not open (probably for moonbag)
+                        removed.append(oid)
 
             for oid in removed:
                 logging.warning(f"Removing outdated order {oid}", color="yellow")

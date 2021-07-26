@@ -1,7 +1,7 @@
 import math
 import re
 
-from .errors import CloseTradeException, EntryCrossedException
+from .errors import CloseTradeException, MoveStopLossException, ModifyTargetsException
 from .logger import DEFAULT_LOGGER as logging
 
 
@@ -9,7 +9,7 @@ RESULTS_CHANNEL = -1001271281417
 
 
 def extract_numbers(line: str, symbol=""):
-    res = list(map(float, re.findall(r'(\d+(?:\.\d+)?)', line.replace(",", "."))))
+    res = list(map(float, re.findall(r'(\.?\d+(?:\.\d+)?)', line.replace(",", "."))))
     if re.search(r"\d+", symbol):
         res.pop(0)
     return res
@@ -32,8 +32,8 @@ class Signal:
     DEFAULT_RISK = 0.01
     DEFAULT_RISK_FACTOR = 1
 
-    def __init__(self, coin, entries, targets, sl=None, leverage=None, risk_factor=None,
-                 force_limit=False, stop_percent=False, tag=None):
+    def __init__(self, coin, entries=[], targets=[], sl=None, leverage=None, risk_factor=None,
+                 is_long=None, force_limit=False, stop_percent=False, tag=None):
         self.coin = coin.upper()
         self.entries = sorted(entries)
         self.sl = sl
@@ -44,6 +44,9 @@ class Signal:
         self.fraction = 0
         self.risk = self.DEFAULT_RISK * (risk_factor if risk_factor else self.DEFAULT_RISK_FACTOR)
         self.force_limit_order = force_limit
+        self._is_long = is_long
+        if self.is_partial:
+            return
         prev = self.entries[0]
         for t in self.targets:
             assert (t > prev if self.is_long else t < prev)
@@ -52,15 +55,23 @@ class Signal:
             assert self.sl < self.entries[0] if self.is_long else self.sl > self.entries[-1]
 
     @classmethod
-    def parse(cls, chat_id: int, text: str):
+    def parse(cls, chat_id: int, text: str, risk_factor=None):
         ch = CHANNELS.get(chat_id)
         if not ch:
             return
         sig = ch.parse(text.lower())
+        if risk_factor is not None and risk_factor > 0:
+            sig.risk_factor = (sig.risk / cls.DEFAULT_RISK) * risk_factor  # maintain per-channel risk bias
         return sig
 
     @property
+    def is_partial(self):
+        return self._is_long is not None
+
+    @property
     def is_long(self):
+        if self.is_partial:
+            return self._is_long
         return self.targets[0] > self.entries[0]
 
     @property
@@ -76,14 +87,19 @@ class Signal:
         self.risk = self.DEFAULT_RISK * factor
 
     @property
+    def risk_reward(self):
+        return abs((self.targets[-1] - self.entry) / (self.entry - self.sl))
+
+    @property
     def max_entry(self):
         # 20% offset b/w entry and first target
         return self.entry + (self.targets[0] - self.entry) * 0.2
 
     def correct(self, price):
-        self.entries = list(map(lambda i: i * self.factor(i, price), self.entries))
+        factor = self.factor(self.entries[0], price)
+        self.entries = list(map(lambda i: i * factor, self.entries))
         self.entries.sort()
-        self.targets = list(map(lambda i: i * self.factor(i, price), self.targets))
+        self.targets = list(map(lambda i: i * factor, self.targets))
         self.wait_entry = (self.is_long and price < self.entries[0]) or (self.is_short and price > self.entries[-1])
         if self.wait_entry:
             self.entry = self.entries[0] if self.is_long else self.entries[-1]
@@ -95,14 +111,10 @@ class Signal:
             logging.warning(f"Setting {self.sl} as stop loss for {self.coin}: "
                             f"{self.entry} - {self.stop_pct * 100}%")
         else:
-            self.sl *= self.factor(self.sl, price)
+            self.sl *= factor
         percent = self.entry / self.sl
         percent = percent - 1 if self.is_long else 1 - percent
         self.fraction = self.risk / (percent * self.leverage)
-        if self.force_limit_order:
-            return
-        if (self.is_long and price > self.max_entry) or (self.is_short and price < self.max_entry):
-            raise EntryCrossedException(price)
 
     def factor(self, sig_p, mark_p):
         # Fix for prices which are human-readable at times when we'll find lack of some precision
@@ -129,7 +141,43 @@ class RESULTS:
         if "cancel " in text or "close " in text:
             raise CloseTradeException(tag=text.split(" ")[1].lower())
 
-        p, force = cls.__name__, False
+        if "\n" not in text:
+            sig, tag, parts = [None] * 3
+            if text.startswith("long") or text.startswith("short"):
+                parts = text.split(" ")
+                is_long = parts.pop(0) == "long"
+                sig = Signal(parts.pop(0), is_long=is_long)
+                res = extract_optional_number(parts[0])
+                if res:
+                    parts.pop(0)
+                    sig.entries = [res]
+            if text.startswith("change"):
+                parts = text.split(" ")[1:]
+                tag = parts.pop(0)
+            assert parts
+            if parts[0] == "sl":
+                parts.pop(0)
+                res = extract_optional_number(parts.pop(0))
+                if sig is None:
+                    raise MoveStopLossException(tag, res)
+                assert res
+                sig.sl = res
+            if parts and parts[0] == "tp":
+                parts.pop(0)
+                targets = []
+                while parts:
+                    res = extract_optional_number(parts[0])
+                    if not res:
+                        break
+                    parts.pop(0)
+                    targets.append(res)
+                if sig is None:
+                    raise ModifyTargetsException(tag, targets)
+                assert targets
+                sig.targets = sorted(targets)
+            return sig
+
+        p, force = None, False
         c, er, sl, t, lv, r = [None] * 6
         for line in map(str.strip, text.split("\n")):
             if line.startswith("c "):
@@ -150,9 +198,53 @@ class RESULTS:
                 res = extract_symbol(line, prefix="p ", suffix=None)
                 p = res[1]
         assert c and er and t
+        if p:
+            p = p.lower()
         if "force" in line:
             force = True
-        return Signal(c, er, t, sl, leverage=lv, risk_factor=r, tag=p.lower(), force_limit=force)
+        return Signal(c, er, t, sl, leverage=lv, risk_factor=r, force_limit=force, tag=p)
+
+
+class AS:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        t, er = [], []
+        c, sl, lv = [None] * 3
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+                if not er:
+                    j = i + 1
+                    while True:
+                        n = extract_numbers(lines[j])
+                        if len(n) < 2:
+                            break
+                        er.append(n[1])
+                        j += 1
+            if re.search("take.profit", line) or line.startswith("targets"):
+                t = extract_numbers(line)
+                if not t:
+                    j = i + 1
+                    while True:
+                        assert "✅" not in lines[j]
+                        n = extract_numbers(lines[j])
+                        if len(n) < 2:
+                            break
+                        t.append(n[1])
+                        j += 1
+            if "stop" in line or "sl" in line:
+                sl = extract_optional_number(line)
+                if not sl:
+                    res = extract_numbers(lines[i + 1])
+                    sl = res[1]
+            if "leverage" in line:
+                lv = extract_optional_number(line)
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, lv, tag=cls.__name__)
 
 
 class BAW:
@@ -200,14 +292,14 @@ class BFP2:
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "leverage" in text
-        c, e, sl, t, lv = [None] * 5
+        c, er, sl, t, lv = [None] * 5
         for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line)
+            res = extract_symbol(line, suffix="usdt" if "usdt" in line else None)
             if res:
                 c = res[1]
-                e = extract_optional_number(line.split("usdt")[-1])
+                er = extract_numbers(line, c)
             if "buy" in line:
-                e = extract_optional_number(line.split("usdt")[-1])
+                er = extract_numbers(line, c)
             if "target" in line:
                 t = extract_numbers(line)
             if "stop loss" in line:
@@ -216,27 +308,28 @@ class BFP2:
                 lv = extract_numbers(line) or None
                 if lv:
                     lv = int(lv[-1])
-        assert c and e and sl and t
-        return Signal(c, [e], t, sl, leverage=lv, tag=cls.__name__)
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class BK:
     @classmethod
     def parse(cls, text: str) -> Signal:
         assert "direction" in text and "targets" in text and "stop loss" in text
-        c, er, t, sl = [None] * 4
+        t = []
+        c, er, sl = [None] * 3
         for line in map(str.strip, text.split("\n")):
             res = extract_symbol(line, prefix=r"\$")
             if res:
                 c = res[1]
             if "entry" in line:
                 er = extract_numbers(line)
-            if "short term" in line:
-                t = extract_numbers(line)
+            if "term" in line:
+                t.extend(extract_numbers(line))
             if "stop loss" in line:
                 sl = extract_optional_number(line)
         assert c and er and t and sl
-        return Signal(c, er, t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class BPS:
@@ -264,47 +357,6 @@ class BPS:
                 sl = extract_optional_number(line)
         assert c and er and t and sl
         return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class BSS:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "open short" in text or "open long" in text
-        c, er, t, sl = [None] * 4
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, suffix=None)
-            if res:
-                c = res[1]
-            if "entry" in line:
-                er = extract_numbers(line)
-            if "target" in line:
-                t = extract_numbers(line)
-            if "stoploss" in line:
-                sl = extract_optional_number(line)
-        assert c and er and t and sl
-        return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class BUSA:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert re.search(r"/usdt ((x[0-9]+)|([0-9]+x)|(.short.)|(.long.))", text)
-        t = []
-        c, er, sl = [None] * 3
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, prefix=None)
-            if res:
-                c = res[1]
-            if "now" in line or "entry" in line:
-                er = extract_numbers(line)
-            if re.search(r"target.*\d.*:", line):
-                t.append(extract_numbers(line)[-1])
-            elif "target" in line:
-                t = extract_numbers(line)
-            if "stop" in line or "sl" in line:
-                sl = extract_optional_number(line)
-        assert c and er and t
-        return Signal(c, er, t, sl, risk_factor=0.5, stop_percent=None if sl else 0.1, tag=cls.__name__)
 
 
 class BVIP:
@@ -358,25 +410,6 @@ class C:
             if "stop" in line:
                 sl = float(line.split(" ")[-1])
         assert c and er and sl and t
-        return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class CB:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "futures" in text
-        c, er, t, sl = [None] * 4
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line)
-            if res:
-                c = res[1]
-            if "entry" in line:
-                er = extract_numbers(line)
-            if "targets" in line:
-                t = extract_numbers(line)
-            if "stoploss" in line:
-                sl = extract_optional_number(line)
-        assert c and er and t and sl
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
@@ -447,7 +480,7 @@ class CCS:
             if "sl" in line:
                 sl = extract_optional_number(line)
         assert c and er and t  # It's fine if SL is not there
-        return Signal(c, er, t, sl, force_limit=True, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, stop_percent=0.07, tag=cls.__name__)
 
 
 class CEP:
@@ -468,30 +501,6 @@ class CEP:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
         return Signal(c, er, t[:5], sl, leverage=20, tag=cls.__name__)
-
-
-class CM:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "binance futures" in text
-        t = []
-        c, er, sl = [None] * 3
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line)
-            if res:
-                c = res[1]
-            if "entry" in line:
-                er = extract_numbers(line)
-            if "target" in line:
-                t.append(extract_numbers(line)[-1])
-            if "stop loss" in line:
-                sl = extract_optional_number(line)
-        assert c and er and sl and t
-        return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class CS(CM):
-    pass
 
 
 class CY:
@@ -528,7 +537,7 @@ class CY:
                 lv = extract_optional_number(line)
                 lv = int(lv) if lv else None
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.5, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class E:
@@ -547,7 +556,7 @@ class E:
             if "sl" in line:
                 sl = extract_optional_number(line)
         assert c and er and t and sl
-        return Signal(c, er, t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class EBS:
@@ -568,7 +577,8 @@ class EBS:
             if "target" in line:
                 t.append(extract_numbers(line)[-1])
         assert c and e and t and lev
-        return Signal(c, [e], t, leverage=lev, risk_factor=0.5, tag=cls.__name__)
+        c = c.upper()
+        return Signal(c, [e], t, leverage=lev, stop_percent=0.025, tag=cls.__name__)
 
 
 class FWP:
@@ -588,7 +598,7 @@ class FWP:
             if re.search(r"sto..loss", line):
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=20, risk_factor=0.5, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class FXVIP:
@@ -620,7 +630,7 @@ class FXVIP:
             if "leverage" in line:
                 lv = int(extract_numbers(line)[-1])
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.5, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class HBTCV:
@@ -693,13 +703,12 @@ class JMP:
             if "sl" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class JPC:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert "long" in text or "short" in text
         t = []
         c, er, sl = [None] * 3
         lines = [line for line in map(str.strip, text.split("\n")) if line]
@@ -707,7 +716,7 @@ class JPC:
             res = extract_symbol(line)
             if res:
                 c = res[1]
-            if "long" in line or "short" in line:
+            if "long" in line or "short" in line or "entry" in line:
                 er = extract_numbers(line)
                 if not er and "entry" in line:
                     er = extract_numbers(lines[i + 1])
@@ -718,7 +727,7 @@ class JPC:
             if re.search(r"stop.?loss", line):
                 sl = extract_optional_number(line)
         assert c and er and t and sl
-        return Signal(c, er, t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class KBV:
@@ -734,9 +743,9 @@ class KBV:
                 c = res[1]
             if "entry" in line or "buy" in line:
                 er = extract_numbers(line)
-            if "sell" in line or re.search(r"take.profit", line):
+            if "sell" in line or "targets" in line or re.search(r"take.profit", line):
                 t = extract_numbers(lines[i + 1])
-            if "stop loss" in line:
+            if re.search(r"stop.?loss", line):
                 sl = extract_optional_number(line)
             if "lev" in line:
                 lv = int(extract_numbers(line)[-1])
@@ -747,7 +756,7 @@ class KBV:
 class KCE:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert re.search(r"/usdt.*x[0-9]+", text)
+        assert re.search(r"/usdt.*((x[0-9]+)|([0-9]+x))", text)
         t, er = [], []
         c, sl = [None] * 2
         lines = list(map(str.strip, text.split("\n")))
@@ -755,7 +764,7 @@ class KCE:
             res = extract_symbol(line, prefix=None)
             if res:
                 c = res[1]
-                if "buy" in line:
+                if "buy" in line or "now" in line:
                     er = extract_numbers(line, symbol=c)
                     if f"x{int(er[-1])}" in line:
                         er.pop()
@@ -776,10 +785,29 @@ class KSP(HBTCV):
     pass
 
 
+class KVIP:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "binance futures" in text
+        c, er, t, sl = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "tp" in line:
+                t = extract_numbers(line)
+            if "stop" in line:
+                sl = extract_optional_number(line)
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
 class LVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert "lev" in text
+        assert "lev" in text or "future" in text
         c, er, t, sl, lv = [None] * 5
         for line in map(str.strip, text.split("\n")):
             res = extract_symbol(line)
@@ -790,9 +818,9 @@ class LVIP:
                 if res:
                     c = res[1]
             if ("buy" in line or "long" in line or "short" in line) and "fund" not in line:
-                er = extract_numbers(line.replace(",", "."), symbol=c)
+                er = extract_numbers(line, symbol=c)
             if "target" in line:
-                t = extract_numbers(line.replace(",", "."))
+                t = extract_numbers(line)
                 t = t[:5]
             if "stop" in line or "sl" in line:
                 sl = extract_optional_number(line)
@@ -842,7 +870,7 @@ class MVIP:
                 n = extract_numbers(lines[i + 1])
                 sl = float(n[-1])
         assert c and er and sl and lv and t
-        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.2, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class PBF:
@@ -856,11 +884,11 @@ class PBF:
             if res:
                 c = res[1]
             if "entry" in line:
-                er = extract_numbers(line.replace(",", "."))
+                er = extract_numbers(line)
             if "target" in line:
-                t = extract_numbers(line.replace(",", "."))
+                t = extract_numbers(line)
             if "stop loss" in line:
-                sl = extract_optional_number(line.replace(",", "."))
+                sl = extract_optional_number(line)
         assert c and er and t
         return Signal(c, er, t, sl, leverage=20, tag=cls.__name__)
 
@@ -888,7 +916,7 @@ class PVIP:
             if "stop" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, leverage=lv, risk_factor=0.5, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
 
 class RM(HBTCV):
@@ -928,7 +956,7 @@ class RWS:
                 lev = extract_optional_number(line)
                 lev = int(lev) if lev else None
         assert c and er and t and sl
-        return Signal(c, er, t, sl, leverage=lev, risk_factor=0.5, tag=cls.__name__)
+        return Signal(c, er, t, sl, leverage=lev, tag=cls.__name__)
 
 
 class SLVIP:
@@ -950,6 +978,28 @@ class SLVIP:
                 lv = int(extract_numbers(line)[-1])
         assert c and er and t and sl and lv
         return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
+
+
+class SPP:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        if text.startswith("close"):
+            raise CloseTradeException(cls.__name__)
+
+        assert "lev" in text
+        c, er, t, sl = [None] * 4
+        for line in map(str.strip, text.split("\n")):
+            res = extract_symbol(line, prefix=None)
+            if res:
+                c = res[1]
+            if "entry" in line:
+                er = extract_numbers(line)
+            if "target" in line:
+                t = extract_numbers(line)
+            if "stop" in line:
+                sl = extract_optional_number(line)
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class SS:
@@ -1020,22 +1070,24 @@ class TVIPAW:
                 t.append(extract_numbers(line)[-1])
             if "sl" in line:
                 sl = extract_optional_number(line)
-        assert c and er and t and sl
-        return Signal(c, er, t, sl, risk_factor=0.5, tag=cls.__name__)
+        assert c and er and t
+        return Signal(c, er, t, sl, stop_percent=0.05, tag=cls.__name__)
 
 
-class VIPBB:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        sig = KBV.parse(text)
-        sig.tag = cls.__name__
-        sig.risk_factor = 0.5
-        return sig
+class VIPBB(KBV):
+    pass
 
 
 class VIPBS:
     @classmethod
     def parse(cls, text: str) -> Signal:
+        try:
+            sig = CCS.parse(text)
+            sig.tag = cls.__name__
+            return sig
+        except Exception:
+            pass
+
         assert "lev" in text and ("long" in text or "short" in text)
         c, er, sl, t = [None] * 4
         for line in map(str.strip, text.split("\n")):
@@ -1049,7 +1101,7 @@ class VIPBS:
             if "sl" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class VIPCC:
@@ -1060,7 +1112,8 @@ class VIPCC:
 
         assert "leverage" in text
         c, e, sl, t = [None] * 4
-        for line in map(str.strip, text.split("\n")):
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
                 c = res[1]
@@ -1068,6 +1121,8 @@ class VIPCC:
                 e = extract_optional_number(line)
             if "take profit" in line:
                 t = extract_numbers(line)
+                if not t:
+                    t = extract_numbers(lines[i + 1])
             if "stoploss" in line:
                 sl = extract_optional_number(line)
         assert c and e and sl and t
@@ -1109,7 +1164,7 @@ class VIPCS:
             elif "stop target" in line:
                 sl = extract_numbers(lines[i + 1])[-1]
         assert c and e and t and sl
-        return Signal(c, [e], t, sl, risk_factor=2, tag=cls.__name__)
+        return Signal(c, [e], t, sl, tag=cls.__name__)
 
 
 class W:
@@ -1118,8 +1173,13 @@ class W:
         assert "long" in text or "short" in text
         c, er, t, sl = [None] * 4
         for line in map(str.strip, text.split("\n")):
+            prefix, suffix = None, None
             if "$" in line:
-                res = extract_symbol(line, prefix=r"\$", suffix=None)
+                prefix = r"\$"
+            elif "- usdt" in line:
+                suffix = " - usdt"
+            if not c:
+                res = extract_symbol(line, prefix=prefix, suffix=suffix)
                 if res:
                     c = res[1]
             if "sell" in line or "buy" in line or "long" in line or "short" in line:
@@ -1128,25 +1188,6 @@ class W:
                 t = extract_numbers(line)
             if "stop" in line:
                 sl = extract_numbers(line)[-1]
-        assert c and er and t and sl
-        return Signal(c, er, t, sl, tag=cls.__name__)
-
-
-class WB:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
-        assert "future call" in text
-        c, er, t, sl = [None] * 4
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line)
-            if res:
-                c = res[1]
-            if "buy" in line:
-                er = extract_numbers(line)
-            if "sell" in line:
-                t = extract_numbers(line)
-            if "stop loss" in line:
-                sl = extract_optional_number(line)
         assert c and er and t and sl
         return Signal(c, er, t, sl, tag=cls.__name__)
 
@@ -1173,27 +1214,25 @@ class YCP:
 CHANNELS = {
     RESULTS_CHANNEL: RESULTS,
 
+    -1001223953723: AS,
+    -1001439918611: AS,
     -1001293741800: BAW,
     -1001418856446: BFP,
     -1001447775833: BFP2,
+    -1001524035518: BK,
     -1001513745075: BK,
     -1001397582022: BPS,
     -1001273049293: BPS,
-    # -1001365009067: BSS,
-    -1001262300473: BUSA,
     -1001276380825: BVIP,
     -1001190501437: C,
-    -1001298917999: CB,
     -1001407454871: CC,
     -1001287944622: CCC,
     -1001445041500: CCC,
     -1001498099485: CCS,
     -1001475802140: CCS,
     -1001312576400: CEP,
-    -1001286357956: CEP,
-    -1001390568202: CM,
-    -1001147998012: CS,
     -1001324222809: CY,
+    -1001248545865: E,
     -1001332814834: EBS,
     -1001304374569: FWP,
     -1001153052713: FWP,
@@ -1205,10 +1244,11 @@ CHANNELS = {
     -1001245250001: KBV,
     -1001455150678: KCE,
     -1001214337237: KSP,
+    -1001520411679: KVIP,
     -1001332251855: LVIP,
     -1001330855662: MCVIP,
     -1001533022194: MCVIP,
-    # -1001196181927: MVIP,
+    -1001196181927: MVIP,
     -1001368285182: PBF,
     -1001436013269: PHVIP,
     -1001309017279: PVIP,
@@ -1221,15 +1261,17 @@ CHANNELS = {
     -1001239897393: TCA,
     -1001437351757: TCA,
     -1001399542308: TCA,
+    -1001410304006: TCA,
     -1001454931835: TVIPAW,
+    -1001382199326: TVIPAW,
     -1001130702368: VIPBB,
     -1001275757686: VIPBB,
+    -1001432566490: VIPBB,
     -1001233787725: VIPBS,
     -1001145827997: VIPCC,
     -1001225455045: VIPCS,
     -1001237277943: W,
     -1001400828878: W,
-    # -1001434920650: WB,
     -1001482194573: YCP,
     -1001470298343: YCP,
 }

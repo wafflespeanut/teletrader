@@ -20,3 +20,15 @@ class CloseTradeException(Exception):
     def __init__(self, tag, coin=None):
         self.tag = tag
         self.coin = coin.upper() if coin else None
+
+
+class MoveStopLossException(Exception):
+    def __init__(self, tag, price):
+        self.tag = tag
+        self.price = price
+
+
+class ModifyTargetsException(Exception):
+    def __init__(self, tag, targets):
+        self.tag = tag
+        self.targets = targets
