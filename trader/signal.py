@@ -20,14 +20,14 @@ def extract_symbol(line: str, prefix="#", suffix="usdt"):
 
 
 def extract_optional_number(line: str):
-    res = re.search(r"(\d+(?:\.\d+)?)", line.replace(",", "."))
+    res = re.search(r"(\.?\d+(?:\.\d+)?)", line.replace(",", "."))
     return float(res[1]) if res else None
 
 
 class Signal:
     MIN_PRECISION = 6
-    MIN_LEVERAGE = 20  # so that I have sufficient margin
-    DEFAULT_LEVERAGE = 20
+    MIN_LEVERAGE = 25  # so that I have sufficient margin
+    DEFAULT_LEVERAGE = 25
     DEFAULT_STOP = 0.08
     DEFAULT_RISK = 0.01
     DEFAULT_RISK_FACTOR = 1
@@ -55,11 +55,15 @@ class Signal:
             assert self.sl < self.entries[0] if self.is_long else self.sl > self.entries[-1]
 
     @classmethod
+    def sanitized(cls, text: str) -> str:
+        return text.lower().replace("__", "").replace("**", "").replace("\ufeff", "")
+
+    @classmethod
     def parse(cls, chat_id: int, text: str, risk_factor=None):
         ch = CHANNELS.get(chat_id)
         if not ch:
             return
-        sig = ch.parse(text.lower())
+        sig = ch.parse(cls.sanitized(text))
         if risk_factor is not None and risk_factor > 0:
             sig.risk_factor = (sig.risk / cls.DEFAULT_RISK) * risk_factor  # maintain per-channel risk bias
         return sig
@@ -96,10 +100,9 @@ class Signal:
         return self.entry + (self.targets[0] - self.entry) * 0.2
 
     def correct(self, price):
-        factor = self.factor(self.entries[0], price)
-        self.entries = list(map(lambda i: i * factor, self.entries))
+        self.entries = list(map(lambda i: i * self.factor(i, price), self.entries))
         self.entries.sort()
-        self.targets = list(map(lambda i: i * factor, self.targets))
+        self.targets = list(map(lambda i: i * self.factor(i, price), self.targets))
         self.wait_entry = (self.is_long and price < self.entries[0]) or (self.is_short and price > self.entries[-1])
         if self.wait_entry:
             self.entry = self.entries[0] if self.is_long else self.entries[-1]
@@ -111,10 +114,15 @@ class Signal:
             logging.warning(f"Setting {self.sl} as stop loss for {self.coin}: "
                             f"{self.entry} - {self.stop_pct * 100}%")
         else:
-            self.sl *= factor
+            self.sl *= self.factor(self.sl, price)
         percent = self.entry / self.sl
         percent = percent - 1 if self.is_long else 1 - percent
         self.fraction = self.risk / (percent * self.leverage)
+        prev = self.entry
+        for i, tgt in enumerate(self.targets):
+            diff = ((tgt - prev) if self.is_long else (prev - tgt)) * 0.01  # front-run trades (bots out there)
+            self.targets[i] = (tgt - diff) if self.is_long else (tgt + diff)
+            prev = tgt
 
     def factor(self, sig_p, mark_p):
         # Fix for prices which are human-readable at times when we'll find lack of some precision
@@ -208,6 +216,10 @@ class RESULTS:
 class AS:
     @classmethod
     def parse(cls, text: str) -> Signal:
+        if text.startswith("close"):
+            parts = text.split(" ")[1:]
+            raise CloseTradeException(cls.__name__, parts[-1].replace("usdt", "") if parts else None)
+
         t, er = [], []
         c, sl, lv = [None] * 3
         lines = [line for line in map(str.strip, text.split("\n")) if line]
@@ -382,6 +394,37 @@ class BVIP:
         return Signal(c, er, t, sl, leverage=lev, tag=cls.__name__)
 
 
+class BVIP2:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "leverage" in text
+        t = []
+        c, er, sl = [None] * 3
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
+            if "usdt" in line:
+                res = extract_symbol(line, prefix="#" if "#" in line else None)
+                if res:
+                    c = res[1]
+                er = extract_numbers(line)
+            if "entry zone" in line:
+                er = extract_numbers(lines[i + 1])
+            if "take-profit" in line or "targets" in line:
+                j = i + 1
+                while lines[j].startswith("🎯"):
+                    n = extract_optional_number(lines[j])
+                    if not n:
+                        break
+                    t.append(n)
+                    j += 1
+            if "stop loss" in line:
+                sl = extract_optional_number(line)
+                if not sl:
+                    sl = extract_optional_number(lines[i + 1])
+        assert c and er and sl and t
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
 class C:
     @classmethod
     def parse(cls, text: str) -> Signal:
@@ -475,7 +518,7 @@ class CCS:
                 c = res[1]
             if "long" in line or "short" in line:
                 er = extract_numbers(line)
-            if "take profit" in line:
+            if "take profit" in line or "target" in line:
                 t = extract_numbers(line)
             if "sl" in line:
                 sl = extract_optional_number(line)
@@ -500,7 +543,7 @@ class CEP:
             if "stoploss" in line:
                 sl = extract_optional_number(line)
         assert c and er and sl and t
-        return Signal(c, er, t[:5], sl, leverage=20, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class CY:
@@ -562,23 +605,20 @@ class E:
 class EBS:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        assert "leverage" in text
         t = []
-        c, e, lev = [None] * 3
+        c, e = [None] * 2
         lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
                 c = res[1]
-            if "leverage" in line:
-                lev = int(extract_optional_number(line))
             if "entry" in line:
                 e = extract_numbers(lines[i + 1])[-1]
             if "target" in line:
                 t.append(extract_numbers(line)[-1])
-        assert c and e and t and lev
+        assert c and e and t
         c = c.upper()
-        return Signal(c, [e], t, leverage=lev, stop_percent=0.025, tag=cls.__name__)
+        return Signal(c, [e], t, leverage=100, stop_percent=0.025, tag=cls.__name__)
 
 
 class FWP:
@@ -604,7 +644,7 @@ class FWP:
 class FXVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
-        for ch in [CCS, FWP, MCVIP, PBF]:
+        for ch in [AS, CCS, FWP, MCVIP, PBF]:
             try:
                 sig = ch.parse(text)
                 sig.tag = cls.__name__
@@ -615,18 +655,30 @@ class FXVIP:
             except Exception:
                 pass
 
+        t = []
         c, er, sl, lv = [None] * 4
-        assert "leverage" in text
-        for line in map(str.strip, text.split("\n")):
-            res = extract_symbol(line, prefix=None)
-            if res:
-                c = res[1]
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
+            if not c:
+                res = extract_symbol(line, prefix="#" if "#" in line else None)
+                if res:
+                    c = res[1]
             if "entry" in line:
                 er = extract_numbers(line)
-            if "target " in line:
+            if line.startswith("target"):
                 t = extract_numbers(line)
+            if "take-profit" in line:
+                j = i + 1
+                while True:
+                    n = extract_numbers(lines[j])
+                    if len(n) < 2:
+                        break
+                    t.append(n[1])
+                    j += 1
             if "stop loss" in line:
                 sl = extract_optional_number(line)
+            if "stop target" in line:
+                sl = extract_numbers(lines[i + 1])[1]
             if "leverage" in line:
                 lv = int(extract_numbers(line)[-1])
         assert c and er and sl and t
@@ -647,7 +699,7 @@ class HBTCV:
         except Exception:
             pass
 
-        assert "binance futures" in text
+        assert "binance futures" in text or "leverage" in text
         t, er = [], []
         c, sl, lv = [None] * 3
         lines = [line for line in map(str.strip, text.split("\n")) if line]
@@ -678,7 +730,7 @@ class HBTCV:
                 t = extract_numbers(line)
             if "stop target" in line:
                 sl = extract_numbers(lines[i + 1])[1]
-            if "stoploss" in line:
+            if re.search(r"stop.?loss", line):
                 sl = extract_optional_number(line)
             if "leverage" in line:
                 lv = extract_numbers(line)[-1]
@@ -716,6 +768,7 @@ class JPC:
             res = extract_symbol(line)
             if res:
                 c = res[1]
+                er = extract_numbers(lines[i + 1])
             if "long" in line or "short" in line or "entry" in line:
                 er = extract_numbers(line)
                 if not er and "entry" in line:
@@ -724,7 +777,7 @@ class JPC:
                 t.append(extract_numbers(line)[-1])
             if "target" in line:
                 t = extract_numbers(line)
-            if re.search(r"stop.?loss", line):
+            if re.search(r"stop.?loss", line) or "sl" in line:
                 sl = extract_optional_number(line)
         assert c and er and t and sl
         return Signal(c, er, t, sl, tag=cls.__name__)
@@ -738,7 +791,7 @@ class KBV:
         c, er, sl, lv = [None] * 4
         lines = list(map(str.strip, text.split("\n")))
         for i, line in enumerate(lines):
-            res = extract_symbol(line)
+            res = extract_symbol(line, prefix="#" if "#" in line else r"\$")
             if res:
                 c = res[1]
             if "entry" in line or "buy" in line:
@@ -785,6 +838,29 @@ class KSP(HBTCV):
     pass
 
 
+class KK:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        c, er, t, sl = [None] * 4
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
+            res = extract_symbol(line, prefix=r"\$", suffix=None)
+            if res:
+                c = res[1]
+                if c.endswith("/usdt"):
+                    c = c.replace("/usdt", "")
+            if "long" in line or "entry" in line or "buy" in line:
+                er = extract_numbers(line)
+                if not er:
+                    er = extract_numbers(lines[i + 1])
+            if "tp" in line:
+                t = extract_numbers(line)
+            if "sl" in line:
+                sl = extract_optional_number(line)
+        assert c and er and t and sl
+        return Signal(c, er, t, sl, tag=cls.__name__)
+
+
 class KVIP:
     @classmethod
     def parse(cls, text: str) -> Signal:
@@ -809,7 +885,8 @@ class LVIP:
     def parse(cls, text: str) -> Signal:
         assert "lev" in text or "future" in text
         c, er, t, sl, lv = [None] * 5
-        for line in map(str.strip, text.split("\n")):
+        lines = [line for line in map(str.strip, text.split("\n")) if line]
+        for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
                 c = res[1]
@@ -819,9 +896,10 @@ class LVIP:
                     c = res[1]
             if ("buy" in line or "long" in line or "short" in line) and "fund" not in line:
                 er = extract_numbers(line, symbol=c)
+                if not er:
+                    er = extract_numbers(lines[i + 1])
             if "target" in line:
                 t = extract_numbers(line)
-                t = t[:5]
             if "stop" in line or "sl" in line:
                 sl = extract_optional_number(line)
             if "lev" in line:
@@ -854,8 +932,13 @@ class MVIP:
                 line = line.replace(" ", "")
                 res = extract_symbol(line)
                 c = res[1]
+            if "long" in line or "short" in line:
+                res = extract_symbol(line, prefix=None)
+                c = res[1]
             if "entry" in line:
-                er = extract_numbers(lines[i + 1])
+                er = extract_numbers(line)
+                if not er:
+                    er = extract_numbers(lines[i + 1])
             if "take-profit" in line:
                 j = i + 1
                 while True:
@@ -864,11 +947,15 @@ class MVIP:
                         break
                     t.append(n[-1])
                     j += 1
+            elif line.startswith("targets"):
+                t = extract_numbers(line)
             if "rage" in line:
                 lv = int(extract_optional_number(line))
             if "stop" in line:
-                n = extract_numbers(lines[i + 1])
-                sl = float(n[-1])
+                sl = extract_optional_number(line)
+                if not sl:
+                    n = extract_numbers(lines[i + 1])
+                    sl = float(n[-1])
         assert c and er and sl and lv and t
         return Signal(c, er, t, sl, leverage=lv, tag=cls.__name__)
 
@@ -890,7 +977,7 @@ class PBF:
             if "stop loss" in line:
                 sl = extract_optional_number(line)
         assert c and er and t
-        return Signal(c, er, t, sl, leverage=20, tag=cls.__name__)
+        return Signal(c, er, t, sl, tag=cls.__name__)
 
 
 class PHVIP(KSP):
@@ -1099,7 +1186,7 @@ class VIPBS:
             if "sell" in line:
                 t = extract_numbers(line)
             if "sl" in line:
-                sl = extract_optional_number(line)
+                sl = extract_optional_number(line.split("....")[-1])
         assert c and er and sl and t
         return Signal(c, er, t, sl, tag=cls.__name__)
 
@@ -1111,22 +1198,27 @@ class VIPCC:
             raise CloseTradeException(cls.__name__)
 
         assert "leverage" in text
-        c, e, sl, t = [None] * 4
+        t = []
+        c, e, sl = [None] * 3
         lines = [line for line in map(str.strip, text.split("\n")) if line]
         for i, line in enumerate(lines):
             res = extract_symbol(line)
             if res:
                 c = res[1]
-            if "short" in line or "long" in line:
+            if "short" in line or "long" in line and not e:
+                e = extract_optional_number(line)
+            if "entry" in line and not e:
                 e = extract_optional_number(line)
             if "take profit" in line:
                 t = extract_numbers(line)
                 if not t:
                     t = extract_numbers(lines[i + 1])
-            if "stoploss" in line:
+            if "target" in line:
+                t.append(extract_numbers(line)[-1])
+            if re.search(r"stop.?loss", line):
                 sl = extract_optional_number(line)
-        assert c and e and sl and t
-        return Signal(c, [e], t, sl, tag=cls.__name__)
+        assert c and e and t
+        return Signal(c, [e], t, sl, stop_percent=0.07, tag=cls.__name__)
 
 
 class VIPCS:
@@ -1192,9 +1284,22 @@ class W:
         return Signal(c, er, t, sl, tag=cls.__name__)
 
 
+class WC:
+    @classmethod
+    def parse(cls, text: str) -> Signal:
+        assert "long" in text or "short" in text
+        # c, er, t, sl = [None] * 4
+        # for line in map(str.strip, text.split("\n")):
+        #     res = extract_symbol(line.split("")[1], suffix=None)
+
+
 class YCP:
     @classmethod
     def parse(cls, text: str) -> Signal:
+        if text.startswith("cancel"):
+            res = extract_symbol(text)
+            raise CloseTradeException(cls.__name__, coin=res[1] if res else None)
+
         assert "leverage" in text
         c, er, t, sl = [None] * 4
         for line in map(str.strip, text.split("\n")):
@@ -1224,6 +1329,7 @@ CHANNELS = {
     -1001397582022: BPS,
     -1001273049293: BPS,
     -1001276380825: BVIP,
+    -1001437647638: BVIP2,
     -1001190501437: C,
     -1001407454871: CC,
     -1001287944622: CCC,
@@ -1233,7 +1339,7 @@ CHANNELS = {
     -1001312576400: CEP,
     -1001324222809: CY,
     -1001248545865: E,
-    -1001332814834: EBS,
+    # -1001332814834: EBS,
     -1001304374569: FWP,
     -1001153052713: FWP,
     -1001342941479: FXVIP,
@@ -1243,12 +1349,13 @@ CHANNELS = {
     -1001285626718: JMP,
     -1001245250001: KBV,
     -1001455150678: KCE,
+    -1001388385357: KK,
     -1001214337237: KSP,
     -1001520411679: KVIP,
     -1001332251855: LVIP,
     -1001330855662: MCVIP,
     -1001533022194: MCVIP,
-    -1001196181927: MVIP,
+    # -1001196181927: MVIP,
     -1001368285182: PBF,
     -1001436013269: PHVIP,
     -1001309017279: PVIP,
@@ -1256,6 +1363,7 @@ CHANNELS = {
     -1001274400840: RM,
     -1001409491832: RWS,
     -1001437242794: SLVIP,
+    -1001168856764: SPP,
     -1001268297640: SS,
     -1001287312554: SS,
     -1001239897393: TCA,

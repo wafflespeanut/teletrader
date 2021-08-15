@@ -11,7 +11,7 @@ from cachetools import TTLCache
 
 from .errors import EntryCrossedException, InsufficientQuantityException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import Signal
+from .signal import Signal, RESULTS
 from .user_stream import UserStream
 from .utils import NamedLock
 
@@ -22,7 +22,7 @@ ORDER_MAX_RETRIES = 10
 ORDER_RETRY_SLEEP = 5
 PRICE_SLIPPAGE = 1.5  # skip order if funds allocated exceeds estimation by this much
 MAX_TARGETS = 10
-DEFAULT_RR = 1
+DEFAULT_RR = 0.4
 
 
 class OrderType:
@@ -116,6 +116,10 @@ class Trade:
         return f"⏩ Skipped {tag}: {side} {coin} after multiple attempts"
 
     @classmethod
+    def no_margin(cls, signal: Signal):
+        return f"‼️ No margin available for {signal.coin}"
+
+    @classmethod
     def low_rr(cls, tag, side, coin, rr):
         return f"⏩ Skipped {tag}: {side} {coin} because of low risk-reward: ({round(rr, 2)})"
 
@@ -131,8 +135,8 @@ class FuturesTrader:
         self.olock = asyncio.Lock()  # lock to place only one order at a time
         self.slock = asyncio.Lock()  # lock for stream subscriptions
         self.order_queue = asyncio.Queue()
-        # cache to disallow orders with same symbol, entry and first TP for 10 mins
-        self.sig_cache = TTLCache(maxsize=100, ttl=600)
+        # cache to disallow orders with same symbol, entry and first TP for 12 hours
+        self.sig_cache = TTLCache(maxsize=1000, ttl=12 * 3600)
         self.balance = 0
         self.results_handler = None
         self.ocount = 0
@@ -173,7 +177,8 @@ class FuturesTrader:
                 otag = order.get("tag")
                 if not otag:
                     continue
-                if otag.split("-")[0] != tag:
+                otag = otag.lower()
+                if otag.split("-")[0] != tag.lower() and otag != tag.lower():
                     continue
                 if coin is not None and order["sym"] != f"{coin}USDT":
                     continue
@@ -264,9 +269,7 @@ class FuturesTrader:
         asyncio.ensure_future(_gatherer())
 
     async def _place_partial_order(self, signal: Signal):
-        symbol = f"{signal.coin}USDT"
-        f = self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
-        asyncio.ensure_future(f)  # async change leverage
+        self._change_leverage(signal)
         # TODO
 
     async def _place_order(self, signal: Signal):
@@ -286,13 +289,11 @@ class FuturesTrader:
             await self.results_handler(Trade.low_rr(signal.tag, side, signal.coin, signal.risk_reward))
             return
 
-        symbol = f"{signal.coin}USDT"
-        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
-        f = self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
-        asyncio.ensure_future(f)  # async change leverage
+        self._change_leverage(signal)
         alloc_funds = self.balance * signal.fraction
         quantity = alloc_funds / (price / signal.leverage)
         logging.info(f"Corrected signal: {signal}", color="cyan")
+        symbol = f"{signal.coin}USDT"
         qty = self._round_qty(symbol, quantity)
         est_funds = qty * signal.entry / signal.leverage
         if (est_funds / alloc_funds) > PRICE_SLIPPAGE:
@@ -348,8 +349,11 @@ class FuturesTrader:
             except Exception as err:
                 logging.error(f"Failed to create order for signal {signal}: {err}, "
                               f"params: {json.dumps(params)}")
-                if isinstance(err, BinanceAPIException) and err.code == -2021:
-                    raise EntryCrossedException(price)
+                if isinstance(err, BinanceAPIException):
+                    if err.code == -2021:
+                        raise EntryCrossedException(price)
+                    elif err.code == -2019:
+                        await self.results_handler(Trade.no_margin(signal))
 
     async def _place_collection_orders(self, order_id):
         await self._place_sl_order(order_id)
@@ -642,7 +646,7 @@ class FuturesTrader:
                             "filled": False,
                         }
                 if order_hit[0] or all(order_hit[1:]):  # All TPs or SL hit
-                    if positions.get(f"{odata['symbol']} {odata['positionSide']}") is None:
+                    if positions.get(odata["sym"] + odata["side"]) is None:
                         # Make sure position is not open (probably for moonbag)
                         removed.append(oid)
 
@@ -713,6 +717,12 @@ class FuturesTrader:
 
         self.price_streamer = asyncio.ensure_future(_streamer())
 
+    def _change_leverage(self, signal: Signal):
+        symbol = f"{signal.coin}USDT"
+        logging.info(f"Modifying leverage to {signal.leverage}x for {symbol}", color="green")
+        f = self.client.futures_change_leverage(symbol=symbol, leverage=signal.leverage)
+        asyncio.ensure_future(f)
+
     async def _cancel_order(self, oid: str, symbol: str):
         try:
             resp = await self.client.futures_cancel_order(symbol=symbol, origClientOrderId=oid)
@@ -723,6 +733,8 @@ class FuturesTrader:
     async def _register_order_for_signal(self, signal: Signal):
         async with self.olock:
             self.sig_cache.expire()
+            if signal.tag == RESULTS.__name__:
+                return True
             # Same provider can't give signal for same symbol within 20 seconds
             key = self._cache_key(signal)
             if self.sig_cache.get(key) is not None:

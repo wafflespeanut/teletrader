@@ -75,15 +75,15 @@ class TeleTrader(TelegramClient):
                     logging.info(f"Ignoring previous message from {tag} as requirements are not met", color="white")
                     return
                 except Exception:
-                    logging.exception(f"Unable to parse previous message >>> {reply.text} <<< as signal")
+                    logging.exception(f"Unable to parse previous message as signal:\n{reply.text}")
                     return
             logging.info(f"Received message for closing {coin if coin else 'all'} "
                          f"trades from {err.tag}: {event.text}", color="red")
             await self.trader.close_trades(err.tag, coin)
         except AssertionError:
-            logging.info(f"Ignoring message from {tag} as requirements are not met", color="white")
+            logging.info(f"Ignoring message from {tag} as requirements are not met:\n{event.text}", color="white")
         except Exception:
-            logging.exception(f"Ignoring message from {tag} due to parse failure: {event.text}")
+            logging.exception(f"Ignoring message from {tag} due to parse failure:\n{event.text}")
 
         if sig is None:
             return
