@@ -8,6 +8,10 @@ class EntryCrossedException(Exception):
         self.price = price
 
 
+class InsufficientMarginException(Exception):
+    pass
+
+
 class InsufficientQuantityException(Exception):
     def __init__(self, alloc_q, alloc_funds, est_q, est_funds):
         self.alloc_q = alloc_q
@@ -29,6 +33,7 @@ class MoveStopLossException(Exception):
 
 
 class ModifyTargetsException(Exception):
-    def __init__(self, tag, targets):
+    def __init__(self, tag, targets, is_percent=False):
         self.tag = tag
         self.targets = targets
+        self.is_percent = is_percent

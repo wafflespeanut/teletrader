@@ -27,7 +27,7 @@ class TeleTrader(TelegramClient):
         await self.connect()
         user_auth = await self.is_user_authorized()
         if not user_auth:
-            logging.info("User is not authorized")
+            logging.error("User is not authorized")
         await self.start()
         logging.info("Initializing binance trader")
         await self.trader.init(api_key, api_secret, state=self.state, loop=self.loop)

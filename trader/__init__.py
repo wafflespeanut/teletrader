@@ -5,14 +5,11 @@ import uuid
 import time
 import traceback
 
-from binance import AsyncClient, BinanceSocketManager
-from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache
 
 from .errors import EntryCrossedException, InsufficientQuantityException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import Signal, RESULTS
-from .user_stream import UserStream
+from .signal import Signal, MAIN
 from .utils import NamedLock
 
 WAIT_ORDER_EXPIRY = 24 * 60 * 60
@@ -23,20 +20,6 @@ ORDER_RETRY_SLEEP = 5
 PRICE_SLIPPAGE = 1.5  # skip order if funds allocated exceeds estimation by this much
 MAX_TARGETS = 10
 DEFAULT_RR = 0.4
-
-
-class OrderType:
-    LIMIT = "LIMIT"
-    MARKET = "MARKET"
-    STOP = "STOP"
-    STOP_MARKET = "STOP_MARKET"
-    TP_MARKET = "TAKE_PROFIT_MARKET"
-
-
-class UserEventType:
-    AccountUpdate = "ACCOUNT_UPDATE"
-    AccountConfigUpdate = "ACCOUNT_CONFIG_UPDATE"
-    OrderTradeUpdate = "ORDER_TRADE_UPDATE"
 
 
 class OrderID:
@@ -733,7 +716,7 @@ class FuturesTrader:
     async def _register_order_for_signal(self, signal: Signal):
         async with self.olock:
             self.sig_cache.expire()
-            if signal.tag == RESULTS.__name__:
+            if signal.tag == MAIN.__name__:
                 return True
             # Same provider can't give signal for same symbol within 20 seconds
             key = self._cache_key(signal)

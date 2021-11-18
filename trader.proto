@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+option go_package = "github.com/wafflespeanut/protos";
+
+package trader;
+
+service Trader {
+    rpc Subscribe() returns (stream Order);
+    rpc Configure(Config) returns (Config);
+    rpc Ingest(Signal) returns (Order);
+    rpc UpdateOrder(OrderPatch) returns (BatchResponse);
+}
+
+message Config {
+    double risk = 1;
+    double min_rr = 2;
+    double entry_slippage = 3;
+    double risk_slippage = 4;
+    uint32 leverage = 5;
+    uint32 min_targets = 6;
+    uint32 max_targets = 7;
+    repeated double dca = 8;
+    double moonbag_percent = 9;
+}
+
+message Signal {
+    Config config = 1;
+    MarketType market = 2;
+    string pair = 3;
+    Entry entry = 4;
+    StopLoss sl = 5;
+    repeated Target targets = 6;
+}
+
+enum MarketType {
+    MARKET_UNKNOWN = 0;
+    MARKET_SPOT = 1;
+    MARKET_FUTURES = 2;
+}
+
+message Entry {
+    repeated double range = 1;
+}
+
+message StopLoss {
+    StopLossStrategy strategy = 1;
+    double percent = 2;
+    double price = 3;
+}
+
+enum StopLossStrategy {
+    SL_FIXED = 0;
+    SL_ENTRY_AFTER_TARGET = 1;
+    SL_TRAILING_TARGETS = 2;
+}
+
+message Target {
+    double percent = 1;
+    double price = 2;
+}
+
+message Order {
+    string id = 1;
+    string symbol = 2;
+    string side = 3;
+    double price = 4;
+    double quantity = 5;
+    double risk = 6;
+    double rr = 7;
+    boolean queued = 8;
+    double target_price = 9;
+    double target_quantity = 10;
+
+    Error error = 20;
+}
+
+message OrderPatch {
+    string id_pattern = 1;
+    boolean close = 2;
+    double sl = 3;
+    repeated Target targets = 4;
+}
+
+message BatchResponse {
+    repeated Order orders = 1;
+}
+
+message Error {
+    ErrorKind kind = 1;
+    string message = 2;
+}
+
+enum ErrorKind {
+    ERR_UNKNOWN = 0;
+    ERR_LOW_RISK_REWARD = 1;
+    ERR_INSUFFICIENT_MARGIN = 2;
+    ERR_SKIP_MULTIPLE_ATTEMPTS = 3;
+    ERR_RISK_LIMIT_REACHED = 4;
+}

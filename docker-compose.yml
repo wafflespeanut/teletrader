@@ -1,0 +1,30 @@
+version: '3'
+
+services:
+  db:
+    image: postgres:12.4-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=postgres
+    volumes:
+      - db:/var/lib/postgresql/data
+
+  trader:
+    build:
+      context: .
+    environment:
+      - SESSION_PATH=/config/trader
+      - TELEGRAM_ID=$TELEGRAM_ID
+      - TELEGRAM_HASH=$TELEGRAM_HASH
+      - API_KEY=$API_KEY
+      - API_SECRET=$API_SECRET
+      - DB_URL=postgres://postgres:password@db:5432/postgres
+    links:
+      - db
+    volumes:
+      - session:/config/trader
+
+volumes:
+  db:
+  session:
