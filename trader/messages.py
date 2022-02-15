@@ -8,6 +8,10 @@ class Message:
                 f"💰 ${round(fund, 2)} (risk: ${round(risk, 2)}, rr: {round(rr, 2)})")
 
     @classmethod
+    def error(cls, tag, message):
+        return f"🚫 {tag}: {message}"
+
+    @classmethod
     def target(cls, tag, coin, entry, q_entry, target, q_target, is_long, is_sl=False):
         side = "SELL" if is_long else "BUY"
         initial = q_target * entry

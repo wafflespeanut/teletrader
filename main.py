@@ -13,6 +13,7 @@ API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 SESSION_PATH = os.getenv("SESSION_PATH")
 STATE_PATH = os.getenv("STATE_PATH")
+TEST = os.getenv("TEST")
 
 # fine to use this logger in async - not looking for performance
 DEFAULT_LOGGER.setLevel(logging.INFO)

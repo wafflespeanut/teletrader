@@ -1,80 +1,62 @@
-import logging as std_logging
+import asyncio
 import json
-import os
 from typing import List
-
-from databases import Database
 
 from .logger import DEFAULT_LOGGER as logging
 
-std_logging.getLogger("databases").propagate = False
 
-SCRIPTS = {}
-migration_path = "/" + os.path.join(*(__file__.split(os.sep)[:-2] + ["migrations"]))
-for name in os.listdir(migration_path):
-    with open(os.path.join(migration_path, name)) as fd:
-        SCRIPTS[name] = fd.read()
+class Position:
+    def __init__(self, symbol: str, entry: float, sl: float, quantity: float):
+        self.symbol = symbol
+        self.entry = entry
+        self.quantity = quantity
+        self.targets: List[float] = []
+        self.sl = sl
+        self.target_orders = []
+        self.sl_order = None
 
 
 class Storage:
-    async def init(self):
-        pass
+    def __enter__(self):
+        raise NotImplementedError
 
-    async def register_new_position(self, order_id: str, exchange_id: int, price: float, quantity: float,
-                                    targets: List[float], stop_loss: float):
-        pass
+    def __exit__(self, exc_type, exc, tb):
+        raise NotImplementedError
 
-    async def change_targets(self, order_id: str, exchange_id: str, price: float, )
+    async def register_position(self, order_id: int, symbol: str, price: float, quantity: float,
+                                targets: List[float], sl: float, is_soft: bool = False):
+        raise NotImplementedError
+
+    async def get_position(self, order_id: str) -> Position:
+        raise NotImplementedError
+
+    async def set_target_order(self, parent_id: str, idx: int, order_id: str):
+        raise NotImplementedError
+
+    async def set_sl_order(self, parent_id: str, order_id: str):
+        raise NotImplementedError
+
+    async def set_position_entry(self, order_id: str, price: float):
+        raise NotImplementedError
+
+    async def set_targets(self, order_id: str, targets: List[float]):
+        raise NotImplementedError
+
+    async def set_sl(self, order_id: str, sl: float):
+        raise NotImplementedError
 
 
-class Postgres(Storage):
-    def __init__(self, url: str):
-        self._db = Database(url)
+class PersistentDict(Storage):
+    def __init__(self, path: str):
+        self._lock = asyncio.Lock()
+        self._state = {}
+        self.path = path
 
-    async def init(self):
-        await self._db.connect()
-        await self._init_migration()
-        await self._migrate()
+    def __enter__(self):
+        with open(self.path, "r") as fd:
+            self._state = json.load(fd)
+        return self
 
-    async def register_position(self, order_id: str, exchange_id: int, price: float, quantity: float,
-                                targets: List[float], stop_loss: float):
-        async with self._db as conn:
-            await conn.execute("""
-                insert into orders
-                (order_id, exchange_id, price, quantity, order_type)
-                values
-                (:order_id, :exchange_id, :price, :quantity, 'INIT')
-            """, values={
-                "order_id": order_id,
-                "exchange_id": exchange_id,
-                "price": price,
-                "quantity": quantity,
-            })
-
-    async def _init_migration(self):
-        res = await self._db.fetch_one(
-            "select count(1) from pg_catalog.pg_tables t where t.tablename = 'trade_migration'")
-        if not res or not res["count"]:
-            await self._db.execute("""
-                CREATE TABLE trade_migration (
-                    id serial,
-                    name varchar,
-                    update_date timestamp not null default current_timestamp
-                )
-            """)
-
-    async def _migrate(self):
-        async with self._db.transaction():
-            applied = await self._db.fetch_all("""
-                select name from trade_migration order by id
-            """)
-            applied = [r["name"] for r in applied]
-            for name, script in SCRIPTS.items():
-                if name in applied:
-                    continue
-                logging.info(f"Executing migration {name}")
-                for part in script.split(";"):
-                    await self._db.execute(part)
-                await self._db.execute("""
-                    insert into trade_migration (name) values (:name)
-                """, values={"name": name})
+    def __exit__(self, exc_type, exc_value, tb):
+        with open(self.path, "w") as fd:
+            json.dump(self._state, fd)

@@ -9,7 +9,7 @@ from cachetools import TTLCache
 
 from .errors import EntryCrossedException, InsufficientQuantityException, PriceUnavailableException
 from .logger import DEFAULT_LOGGER as logging
-from .signal import Signal, MAIN
+from .signal import Signal
 from .utils import NamedLock
 
 WAIT_ORDER_EXPIRY = 24 * 60 * 60

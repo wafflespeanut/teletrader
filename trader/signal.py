@@ -1,21 +1,11 @@
 import math
 import re
 
-from .errors import CloseTradeException, MoveStopLossException, ModifyTargetsException
+from .errors import (CloseTradeException, ModifyRiskException,
+                     MoveStopLossException, ModifyTargetsException)
 
 
-COMMAND_CHANNEL = -1001271281417
-
-
-def extract_numbers(line: str, symbol=""):
-    res = list(map(float, re.findall(r'(\.?\d+(?:\.\d+)?)', line.replace(",", ".").replace(". ", "."))))
-    if re.search(r"\d+", symbol):
-        res.pop(0)
-    return res
-
-
-def extract_symbol(line: str, prefix="#", suffix="usdt"):
-    return re.search((prefix if prefix else "") + r"([a-z0-9]+)[ ]*(\/|\|)?[ ]*?" + (suffix if suffix else ""), line)
+CHANNEL_BINANCE_USDT_FUTURES = -1001271281417
 
 
 def extract_optional_number(line: str):
@@ -25,84 +15,58 @@ def extract_optional_number(line: str):
 
 class Signal:
     MIN_PRECISION = 6
-    MIN_LEVERAGE = 20  # so that I have sufficient margin
-    DEFAULT_LEVERAGE = 20
-    DEFAULT_STOP = 0.08
+    MIN_LEV = 20  # for sufficient margin
+    DEFAULT_LEV = 20
     DEFAULT_RISK = 0.01
     DEFAULT_RISK_FACTOR = 1
 
-    def __init__(self, coin, sl, entry=None, targets=[], leverage=None, risk_factor=None,
-                 is_long=None, percent_targets=False, force_limit=False, stop_percent=False, tag=None):
-        self.coin = coin.upper()
-        self.entry = entry
-        self.percent_targets = percent_targets
+    def __init__(self, asset, quote, sl, is_long=True, stop_percent=False, entry=None,
+                 targets=[], leverage=None, risk_factor=None, soft_sl=False,
+                 percent_targets=False, force_limit=False, tag=None):
+        self.asset = asset.upper()
+        self.quote = quote.upper()
         self.sl = sl
-        self.stop_pct = stop_percent if stop_percent else self.DEFAULT_STOP
+        self.is_long = is_long
+        self.is_sl_percent = stop_percent
+        self.entry = entry
         self.targets = targets
-        self.leverage = max(leverage if leverage else self.DEFAULT_LEVERAGE, self.MIN_LEVERAGE)
+        self.leverage = max(leverage if leverage else self.DEFAULT_LEV, self.MIN_LEV)
+        self.risk = self.DEFAULT_RISK * \
+            (risk_factor if risk_factor else self.DEFAULT_RISK_FACTOR)
+        self.soft_sl = soft_sl
+        self.percent_targets = percent_targets
+        self.force_limit_order = force_limit
         self.tag = tag
         self.fraction = 0
-        self.risk = self.DEFAULT_RISK * (risk_factor if risk_factor else self.DEFAULT_RISK_FACTOR)
-        self.force_limit_order = force_limit
-        self._is_long = is_long
-        if self.is_partial:
-            return
-        prev = self.entry
-        for t in self.targets:
-            assert (t > prev if self.is_long else t < prev)
-            prev = t
 
-    @classmethod
-    def sanitized(cls, text: str) -> str:
-        return text.lower().replace("__", "").replace("**", "").replace("\ufeff", "")
+    @property
+    def risk_factor(self):
+        return self.risk / self.DEFAULT_RISK
+
+    @property
+    def is_short(self):
+        return not self.is_long
+
+    @risk_factor.setter
+    def risk_factor(self, factor):
+        self.risk = self.DEFAULT_RISK * factor
 
     @classmethod
     def parse(cls, chat_id: int, text: str, risk_factor=None):
         ch = CHANNELS.get(chat_id)
         if not ch:
             return
-        sig = ch.parse(cls.sanitized(text))
+        sig = ch.parse(text)
         if risk_factor is not None and risk_factor > 0:
-            sig.risk_factor = (sig.risk / cls.DEFAULT_RISK) * risk_factor  # maintain per-channel risk bias
+            sig.risk_factor = sig.risk_factor + risk_factor  # maintain per-signal bias
         return sig
 
     @property
-    def is_partial(self):
-        return self._is_long is not None
-
-    @property
-    def is_long(self):
-        if self.is_partial:
-            return self._is_long
-        return self.sl < self.entry
-
-    @property
-    def is_short(self):
-        return not self.is_long
-
-    @property
     def symbol(self):
-        return f"{self.coin}USDT"
-
-    @property
-    def risk_factor(self):
-        return self.risk / self.DEFAULT_RISK
-
-    @risk_factor.setter
-    def risk_factor(self, factor):
-        self.risk = self.DEFAULT_RISK * factor
-
-    @property
-    def risk_reward(self):
-        return abs((self.targets[-1] - self.entry) / (self.entry - self.sl))
-
-    @property
-    def max_entry(self):
-        # 5% offset b/w entry and first target
-        return self.entry + (self.targets[0] - self.entry) * 0.05
+        return f"{self.coin}{self.quote}"
 
     def correct(self, price):
-        if self.is_partial and self.entry is None:
+        if self.entry is None:
             self.entry = price
         else:
             self.entry *= self.factor(self.entry, price)
@@ -110,14 +74,17 @@ class Signal:
         if self.percent_targets:
             diff = self.entry - self.sl
             self.targets = list(map(lambda i: self.entry + diff * i / 100, self.targets))
-        self.targets = list(map(lambda i: round(i * self.factor(i, price), 10), self.targets))
-        self.wait_entry = (self.is_long and price < self.entry) or (self.is_short and price > self.entry)
+        self.targets = list(
+            map(lambda i: round(i * self.factor(i, price), 10), self.targets))
+        self.wait_entry = (self.is_long and price < self.entry) or (
+            self.is_short and price > self.entry)
         percent = self.entry / self.sl
         percent = percent - 1 if self.is_long else 1 - percent
         self.fraction = self.risk / (percent * self.leverage)
 
     def factor(self, sig_p, mark_p):
-        # Fix for prices which are human-readable at times when we'll find lack of some precision
+        # Fix for prices which are human-readable at times when we'll find lack of
+        # some precision (i.e., 0.000578 is given as 0.578
         minima = math.inf
         factor = 1
         for i in range(self.MIN_PRECISION * 2):
@@ -131,13 +98,16 @@ class Signal:
         return factor
 
     def __repr__(self):
-        return (f"{self.tag}: {self.coin} x{self.leverage} ({round(self.fraction * 100, 2)}%, "
+        return (f"{self.tag}: {self.coin} x{self.leverage} "
+                f"({round(self.fraction * 100, 2)}%, "
                 f"e: {self.entry}, sl: {self.sl}, targets: {self.targets})")
 
 
-class MAIN:
-    @classmethod
-    def parse(cls, text: str) -> Signal:
+class FuturesParser:
+    def __init__(self, quote):
+        self.quote = quote
+
+    def parse(self, text: str) -> Signal:
         if "cancel " in text or "close " in text:
             raise CloseTradeException(tag=text.split(" ")[1].lower())
 
@@ -145,7 +115,7 @@ class MAIN:
         if text.startswith("long") or text.startswith("short"):
             parts = text.split(" ")
             is_long = parts.pop(0) == "long"
-            sig = Signal(parts.pop(0), 0, is_long=is_long)
+            sig = Signal(parts.pop(0), self.quote, 0, is_long=is_long)
             res = extract_optional_number(parts[0])
             if res:
                 parts.pop(0)
@@ -154,6 +124,16 @@ class MAIN:
             parts = text.split(" ")[1:]
             tag = parts.pop(0)
         assert parts
+        if parts[0] == "r":
+            parts.pop(0)
+            assert (parts[0].startswith("+") or parts[0].startswith("-")) \
+                and parts[0].endswith("%")
+            risk = float(parts.pop(0)[:-1])
+            entry = None
+            if parts:
+                assert parts.pop(0) == "@"
+                entry = extract_optional_number(parts.pop(0))
+            raise ModifyRiskException(tag, risk, entry)
         if parts[0] == "sl":
             parts.pop(0)
             res = extract_optional_number(parts.pop(0))
@@ -161,6 +141,9 @@ class MAIN:
                 raise MoveStopLossException(tag, res)
             assert res
             sig.sl = res
+        if parts and parts[0] == "soft":
+            sig.soft_sl = True
+            parts.pop(0)
         if parts and parts[0] == "tp":
             parts.pop(0)
             targets = []
@@ -179,11 +162,15 @@ class MAIN:
             assert targets
             sig.targets = targets
             sig.percent_targets = is_percent
+        if len(parts) > 1 and parts[0] == "risk":
+            parts.pop(0)
+            sig.risk_factor = float(parts.pop(0))
         if "force" in parts:
             sig.force_limit_order = True
+            assert sig.entry
         return sig
 
 
 CHANNELS = {
-    COMMAND_CHANNEL: MAIN,
+    CHANNEL_BINANCE_USDT_FUTURES: FuturesParser("USDT"),
 }

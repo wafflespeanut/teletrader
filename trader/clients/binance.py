@@ -9,10 +9,13 @@ import janus
 from binance import AsyncClient, BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache
-from unicorn_binance_websocket_api.unicorn_binance_websocket_api_manager import BinanceWebSocketApiManager
+from unicorn_binance_websocket_api.unicorn_binance_websocket_api_manager import \
+    BinanceWebSocketApiManager
 
-from . import FuturesExchangeClient
-from ..errors import EntryCrossedException, InsufficientMarginException, PriceUnavailableException
+from . import (FuturesExchangeClient, Order, OrderCancelEvent,
+               OrderFillEvent, OrderRequest, OrderType)
+from ..errors import (EntryCrossedException, InsufficientMarginException,
+                      PriceUnavailableException)
 from ..logger import DEFAULT_LOGGER as logging
 
 
@@ -20,144 +23,6 @@ class UserEventType:
     AccountUpdate = "ACCOUNT_UPDATE"
     AccountConfigUpdate = "ACCOUNT_CONFIG_UPDATE"
     OrderTradeUpdate = "ORDER_TRADE_UPDATE"
-
-
-class OrderRequest:
-    def __init__(self, symbol, side, client_id, quantity, position_side):
-        self._params = {
-            "symbol": symbol,
-            "side": side,
-            "positionSide": position_side,
-            "type": OrderType.MARKET,
-            "newClientOrderId": client_id,
-            "quantity": quantity,
-        }
-
-    def limit(self, price):
-        self._params["type"] = OrderType.LIMIT
-        self._params["price"] = price
-        self._params["timeInForce"] = "GTC"
-
-    def stop_limit(self, stop_price, limit_price):
-        self._params["type"] = OrderType.STOP
-        self._params["stopPrice"] = stop_price
-        self._params["price"] = limit_price
-
-
-class BinanceFuturesClient(FuturesExchangeClient):
-    def __init__(self, api_key, api_secret):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.balance = 0
-        self.symbols: dict = {}
-        self._inner: AsyncClient = None
-        self._ustream = None
-
-        # Ticker price stream subscription
-        self.prices = TTLCache(maxsize=1000, ttl=10)  # 10 secs timeout for ticker prices
-        self.p_streamer = None
-        self.p_streams = set()
-        self.p_lock = asyncio.Lock()
-
-    async def init(self, test=False, loop=None):
-        self._ustream = BinanceUserStream(self.api_key, self.api_secret, test=test)
-        self.client = await AsyncClient.create(
-            api_key=self.api_key, api_secret=self.api_secret, testnet=test, loop=loop)
-        self.manager = BinanceSocketManager(self.client, loop=loop)
-        resp = await self.client.futures_exchange_info()
-        for info in resp["symbols"]:
-            self.symbols[info["symbol"]] = info
-        resp = await self.client.futures_account_balance()
-        for item in resp:
-            if item["asset"] == "USDT":
-                self.balance = float(item["balance"])
-
-    async def create_order(self, req: OrderRequest):
-        try:
-            params = {
-                "symbol": req.symbol,
-                "side": req.side,
-                "positionSide": req.position_side,
-                "type": req.otype,
-                "newClientOrderId": req.client_id,
-                "quantity": req.quantity,
-            }
-            if req.otype == OrderType.LIMIT:
-                params["price"] = req.price
-                params["timeInForce"] = "GTC"
-            elif req.otype == OrderType.STOP:
-                params["stopPrice"] = req.stop_price
-                params["price"] = req.limit_price
-            resp = await self._inner.futures_create_order(**params)
-        except Exception as err:
-            logging.error(f"Failed to create order: {err}, params: {json.dumps(params)}")
-            if isinstance(err, BinanceAPIException):
-                if err.code == -2021:
-                    raise EntryCrossedException(req.price)
-                elif err.code == -2019:
-                    raise InsufficientMarginException()
-
-    async def get_symbol_price(self, symbol):
-        symbol = symbol.upper()
-        await self._subscribe_futures_symbol_price(symbol)
-        price = self.prices.get(symbol)
-        if price is None:
-            try:
-                resp = None
-                resp = await self._inner.futures_symbol_ticker(symbol=symbol)
-                price = float(resp["price"])
-            except Exception as err:
-                logging.error(f"Failed to fetch price for {symbol}: {err} (response: {resp})")
-        if price is None:
-            raise PriceUnavailableException()
-        return price
-
-    async def change_leverage(self, symbol: str, leverage: int):
-        logging.info(f"Modifying leverage to {leverage}x for {symbol}", color="green")
-        await self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
-
-    def normalize_price(self, symbol, price):
-        info = self.symbols[symbol]
-        for f in info["filters"]:
-            if f["filterType"] == "PRICE_FILTER":
-                return round(price, int(round(math.log(1 / float(f["tickSize"]), 10), 0)))
-        return price
-
-    def normalize_quantity(self, symbol, qty):
-        info = self.symbols[symbol]
-        for f in info["filters"]:
-            if f["filterType"] == "LOT_SIZE":
-                return round(qty, int(round(math.log(1 / float(f["minQty"]), 10), 0)))
-        return qty
-
-    async def _subscribe_futures_symbol_price(self, symbol):
-        async with self.p_lock:
-            symbol = symbol.upper()
-            num_streams = len(self.p_streams)
-            self.p_streams.add(symbol)
-            if num_streams != len(self.p_streams) and self.p_streams is not None:
-                logging.info("Cancelling ongoing ws stream for resubscribing")
-                self.p_streamer.cancel()
-            else:
-                return
-
-        async def _streamer():
-            symbols = list(self.p_streams)
-            subs = list(map(lambda s: f"{s.lower()}@aggTrade", symbols))
-            logging.info(f"Spawning listener for {len(symbols)} symbol(s): {symbols}", color="magenta")
-            async with self.manager.futures_multiplex_socket(subs) as stream:
-                while True:
-                    msg = await stream.recv()
-                    if msg is None:
-                        logging.warning("Received 'null' in price stream", color="red")
-                        continue
-                    try:
-                        symbol = msg["stream"].split("@")[0][:-4].upper()
-                        self.prices[symbol.upper()] = float(msg["data"]["p"])
-                    except Exception as err:
-                        logging.error(f"Failed to get price for {msg['stream']}: {err}")
-
-        self.p_streamer = asyncio.ensure_future(_streamer())
 
 
 class BinanceUserStream:
@@ -179,7 +44,8 @@ class BinanceUserStream:
     def _start(self):
         self.exchange = "binance.com-futures" + ("-testnet" if self.test else "")
         self.manager = BinanceWebSocketApiManager(exchange=self.exchange)
-        self.manager.create_stream("arr", "!userData", api_key=self.key, api_secret=self.secret)
+        self.manager.create_stream(
+            "arr", "!userData", api_key=self.key, api_secret=self.secret)
 
         logging.info("Spawning listener for futures user data")
         while True:
@@ -192,3 +58,163 @@ class BinanceUserStream:
                 self._queue.sync_q.put(msg)
             except Exception as err:
                 logging.error(f"Failed to decode message {buf}: {err}")
+
+
+class BinanceFuturesClient(FuturesExchangeClient):
+    def __init__(self, api_key, api_secret):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.balance = 0
+        self.symbols: dict = {}
+        self._inner: AsyncClient = None
+        self._ustream = None
+
+        async def _empty(*_args):
+            pass
+
+        # event handlers
+        self._bal_upd_hdr = _empty
+        self._ord_fill_hdr = _empty
+        self._ord_cancel_hdr = _empty
+
+        # Ticker price stream subscription
+        self.prices = TTLCache(maxsize=1000, ttl=10)  # 10 secs timeout for ticker prices
+
+    async def init(self, test=False, loop=None):
+        self._ustream = BinanceUserStream(self.api_key, self.api_secret, test=test)
+        self._inner = await AsyncClient.create(
+            api_key=self.api_key, api_secret=self.api_secret, testnet=test, loop=loop)
+        self._manager = BinanceSocketManager(self._inner, loop=loop)
+        self._subscribe_user_events()
+        resp = await self._inner.futures_exchange_info()
+        for info in resp["symbols"]:
+            if info["contractType"] == "PERPETUAL":
+                self.symbols[info["symbol"]] = info
+        self._subscribe_futures_symbol_prices()
+        resp = await self._inner.futures_account_balance()
+        for item in resp:
+            if item["asset"] == "USDT":
+                self.balance = float(item["balance"])
+
+    async def create_order(self, req: OrderRequest):
+        try:
+            params = {
+                "symbol": req.symbol,
+                "side": req.side,
+                "positionSide": req.position_side,
+                "type": req.otype,
+                "newClientOrderId": req.client_id,
+                "quantity": req.quantity,
+            }
+            if req.otype == OrderType.LIMIT:
+                params["price"] = req.price
+                params["timeInForce"] = "GTC"
+            elif req.otype == OrderType.STOP:
+                params["stopPrice"] = req.stop_price
+                params["price"] = req.limit_price
+            resp = await self._inner.futures_create_order(**params)
+            return Order(resp["orderId"])
+        except Exception as err:
+            logging.error(f"Failed to create order: {err}, params: {json.dumps(params)}")
+            if isinstance(err, BinanceAPIException):
+                if err.code == -2021:
+                    raise EntryCrossedException(req.price)
+                elif err.code == -2019:
+                    raise InsufficientMarginException()
+
+    async def get_symbol_price(self, symbol):
+        symbol = symbol.upper()
+        price = self.prices.get(symbol)
+        if price is None:
+            try:
+                resp = None
+                logging.warn(f"Live price not found for {symbol}")
+                resp = await self._inner.futures_symbol_ticker(symbol=symbol)
+                price = float(resp["price"])
+            except Exception as err:
+                logging.error(f"Failed to get price for {symbol}: {err} (resp: {resp})")
+        if price is None:
+            raise PriceUnavailableException()
+        return price
+
+    async def change_leverage(self, symbol: str, leverage: int):
+        await self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+
+    def normalize_price(self, symbol, price):
+        info = self.symbols[symbol]
+        for f in info["filters"]:
+            if f["filterType"] == "PRICE_FILTER":
+                return round(price, int(round(math.log(1 / float(f["tickSize"]), 10), 0)))
+        return price
+
+    def normalize_quantity(self, symbol, qty):
+        info = self.symbols[symbol]
+        for f in info["filters"]:
+            if f["filterType"] == "LOT_SIZE":
+                return round(qty, int(round(math.log(1 / float(f["minQty"]), 10), 0)))
+        return qty
+
+    def register_account_balance_update(self, call):
+        self._bal_upd_hdr = call
+
+    def register_order_fill_update(self, call):
+        self._ord_fill_hdr = call
+
+    def register_order_cancel_update(self, call):
+        self._ord_cancel_hdr = call
+
+    def _subscribe_user_events(self):
+        async def _handler():
+            while True:
+                async with self._ustream.message() as msg:
+                    try:
+                        data = msg
+                        event = msg["e"]
+                        if event == UserEventType.AccountUpdate:
+                            data = msg["a"]
+                        elif event == UserEventType.OrderTradeUpdate:
+                            data = msg["o"]
+                        elif event == UserEventType.AccountConfigUpdate:
+                            data = msg.get("ac", msg.get("ai"))
+                        logging.debug(f"{event}: {data}")
+                        await self._handle_event(msg)
+                    except Exception as err:
+                        logging.exception(f"Failed to handle event {msg}: {err}")
+
+        asyncio.ensure_future(_handler())
+
+    async def _handle_event(self, msg: dict):
+        if msg["e"] == UserEventType.AccountUpdate:
+            for info in msg["a"]["B"]:
+                if info["a"] == "USDT":
+                    self.balance = float(info["cw"])
+                    await self._bal_upd_hdr(self.balance)
+        elif msg["e"] == UserEventType.OrderTradeUpdate:
+            info = msg["o"]
+            order_id, client_id = info["i"], info["c"]
+            price, quantity = float(info["ap"]), float(info["q"])
+            if info["X"] == "FILLED":
+                await self._ord_fill_hdr(OrderFillEvent(order_id, client_id, price, quantity))
+            if info["X"] == "CANCELED":
+                await self._ord_cancel_hdr(OrderCancelEvent(order_id, client_id))
+
+    def _subscribe_futures_symbol_prices(self):
+        symbols = list(self.symbols.keys())
+
+        async def _streamer():
+            subs = list(map(lambda s: f"{s.lower()}@aggTrade", symbols))
+            logging.info(f"Spawning listener for {len(symbols)} symbol(s): {symbols}",
+                         color="magenta")
+            async with self._manager.futures_multiplex_socket(subs) as stream:
+                while True:
+                    msg = await stream.recv()
+                    if msg is None:
+                        logging.warning("Received 'null' in price stream", color="red")
+                        continue
+                    try:
+                        symbol = msg["stream"].split("@")[0].upper()
+                        self.prices[symbol.upper()] = float(msg["data"]["p"])
+                    except Exception as err:
+                        logging.error(f"Failed to get price for {msg['stream']}: {err}")
+
+        asyncio.ensure_future(_streamer())

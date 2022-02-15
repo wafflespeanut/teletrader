@@ -1,9 +1,10 @@
 import asyncio
-from typing import Callable
+from typing import Awaitable, Callable
 
 from ..errors import EntryCrossedException, InsufficientQuantityException, PriceUnavailableException
 from ..clients import FuturesExchangeClient, OrderSide, OrderPositionSide, OrderRequest, OrderFillEvent, OrderCancelEvent
 from ..logger import DEFAULT_LOGGER as logging
+from ..messages import Message
 from ..signal import Signal
 from ..storage import Storage
 from ..utils import NamedLock
@@ -24,7 +25,7 @@ class FuturesTrader:
         await self.client.init(loop=loop)
         logging.info(f"Account balance: {self.client.balance} USDT", on="blue")
 
-    def register_message_handler(self, handler: Callable[[str]]):
+    def register_message_handler(self, handler: Callable[[str], Awaitable[None]]):
         self._msg_handler = handler
 
     async def queue_signal(self, signal: Signal):
@@ -39,10 +40,10 @@ class FuturesTrader:
                     logging.info(f"Unknown symbol {signal.symbol} in signal", color="yellow")
                     continue
                 try:
-                    await self._place_order(signal)
-                    return
+                    return await self._place_order(signal)
                 except PriceUnavailableException:
-
+                    logging.info(f"Price unavailable for {signal.coin}", color="red")
+                    await self._publish_message(Message.error(signal.tag, "Couldn't get price for symbol"))
 
     async def _place_order(self, signal: Signal):
         price = await self.client.get_symbol_price(signal.symbol)

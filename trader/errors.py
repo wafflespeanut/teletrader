@@ -20,10 +20,19 @@ class InsufficientQuantityException(Exception):
         self.est_funds = est_funds
 
 
+# ----- Command-related exceptions ----
+
 class CloseTradeException(Exception):
     def __init__(self, tag, coin=None):
         self.tag = tag
         self.coin = coin.upper() if coin else None
+
+
+class ModifyRiskException(Exception):
+    def __init__(self, tag, risk_factor=None, entry=None):
+        self.tag = tag
+        self.risk_factor = risk_factor
+        self.entry = entry
 
 
 class MoveStopLossException(Exception):

@@ -40,11 +40,22 @@ class OrderRequest:
         self.limit_price = limit_price
 
 
+class Order:
+    def __init__(self, order_id):
+        self.order_id = order_id
+
+
 class OrderFillEvent:
-    def __init__(self, order_id, client_id, price):
+    def __init__(self, order_id, client_id, symbol, price):
         self.order_id = order_id
         self.client_id = client_id
         self.price = price
+        self.symbol = symbol
+
+
+class AccountBalanceEvent:
+    def __init__(self, balance):
+        self.balance = balance
 
 
 class OrderCancelEvent:
@@ -57,26 +68,31 @@ class FuturesExchangeClient:
     async def init(self, api_key, api_secret, loop=None):
         raise NotImplementedError
 
-    async def create_order(self, order: OrderRequest):
+    async def create_order(self, order: OrderRequest) -> Order:
         raise NotImplementedError
 
-    async def get_symbol_price(self, symbol: str):
+    # NOTE: Symbol is a representation of base and quote asset. Different exchanges
+    # have different repr, hence ensure that we're passing `signal.symbol`
+    async def get_symbol_price(self, symbol: str) -> float:
         raise NotImplementedError
 
-    async def change_leverage(self, symbol: str, leverage: int):
+    async def change_leverage(self, symbol: str, leverage: int) -> None:
         raise NotImplementedError
 
-    def normalize_price(self, symbol: str, price: float):
+    def normalize_price(self, symbol: str, price: float) -> float:
         raise NotImplementedError
 
-    def normalize_quantity(self, symbol: str, quantity: float):
+    def normalize_quantity(self, symbol: str, quantity: float) -> float:
         raise NotImplementedError
 
-    def register_account_balance_update(self, callback: Callable[[float], Awaitable[None]]):
+    def register_account_balance_update(
+            self, callback: Callable[[float], Awaitable[None]]) -> None:
         raise NotImplementedError
 
-    def register_order_fill_update(self, callback: Callable[[OrderFillEvent], Awaitable[None]]):
+    def register_order_fill_update(
+            self, callback: Callable[[OrderFillEvent], Awaitable[None]]) -> None:
         raise NotImplementedError
 
-    def register_order_cancel_update(self, callback: Callable[[OrderCancelEvent], Awaitable[None]]):
+    def register_order_cancel_update(
+            self, callback: Callable[[OrderCancelEvent], Awaitable[None]]) -> None:
         raise NotImplementedError
