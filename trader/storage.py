@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import List
+from typing import List, Optional
 
 from .logger import DEFAULT_LOGGER as logging
 
@@ -23,26 +23,25 @@ class Storage:
     def __exit__(self, exc_type, exc, tb):
         raise NotImplementedError
 
-    async def register_position(self, order_id: int, symbol: str, price: float, quantity: float,
+    async def register_position(self, order_id: str, symbol: str, price: float, quantity: float,
                                 targets: List[float], sl: float, is_soft: bool = False):
         raise NotImplementedError
 
-    async def get_position(self, order_id: str) -> Position:
+    async def 
+
+    async def get_position(self, tag: str) -> Optional[Position]:
         raise NotImplementedError
 
-    async def set_target_order(self, parent_id: str, idx: int, order_id: str):
+    async def set_sl_order(self, parent_id: str, tag: str):
         raise NotImplementedError
 
-    async def set_sl_order(self, parent_id: str, order_id: str):
+    async def set_position_entry(self, tag: str, price: float):
         raise NotImplementedError
 
-    async def set_position_entry(self, order_id: str, price: float):
+    async def set_targets(self, tag: str, targets: List[float]):
         raise NotImplementedError
 
-    async def set_targets(self, order_id: str, targets: List[float]):
-        raise NotImplementedError
-
-    async def set_sl(self, order_id: str, sl: float):
+    async def set_sl(self, tag: str, sl: float):
         raise NotImplementedError
 
 

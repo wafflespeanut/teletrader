@@ -2,10 +2,10 @@ import unittest
 
 from .errors import (CloseTradeException, ModifyRiskException,
                      MoveStopLossException, ModifyTargetsException)
-from .signal import CHANNELS, CHANNEL_BINANCE_USDT_FUTURES, Signal
+from .signal import CHANNELS, BINANCE_USDT_FUTURES, Signal
 
 
-USDT_FUTURES_PARSER = CHANNELS[CHANNEL_BINANCE_USDT_FUTURES]
+USDT_FUTURES_PARSER = CHANNELS[BINANCE_USDT_FUTURES]
 
 
 class TestSignal(unittest.TestCase):
@@ -19,11 +19,9 @@ class TestSignal(unittest.TestCase):
         self.assertEqual(s.targets, sig.targets)
         self.assertEqual(s.leverage, sig.leverage)
         self.assertEqual(s.risk, sig.risk)
-        self.assertEqual(s.force_limit_order, sig.force_limit_order)
         self.assertEqual(s.tag, sig.tag)
         self.assertEqual(s.is_long, sig.is_long)
         self.assertEqual(s.percent_targets, sig.percent_targets)
-        self.assertEqual(s.force_limit_order, sig.force_limit_order)
 
 
 class TestUSDT_FUTURES_PARSER(TestSignal):
@@ -35,7 +33,7 @@ class TestUSDT_FUTURES_PARSER(TestSignal):
     def test_2(self):
         # Long CHR at $0.25 with SL @ $0.23 and targets $0.27, $0.29
         self._assert_signal(
-            USDT_FUTURES_PARSER, "long chr 0.25 sl 0.23 tp 0.27 0.29",
+            USDT_FUTURES_PARSER, "l chr 0.25 sl 0.23 tp 0.27 0.29",
             Signal("CHR", "USDT", 0.23, is_long=True, entry=0.25, targets=[0.27, 0.29]))
 
     def test_3(self):
@@ -82,11 +80,10 @@ class TestUSDT_FUTURES_PARSER(TestSignal):
         # Short ATOM at $32.7 with SL @ $32.73 and targets 50% and 75%
         # relative to entry and SL
         s = Signal("ATOM", "USDT", 32.73, entry=32.7, targets=[50, 75], is_long=False,
-                   percent_targets=True, force_limit=True)
+                   percent_targets=True)
         self._assert_signal(
-            USDT_FUTURES_PARSER, "short atom 32.7 sl 32.73 tp 50% 75% force", s)
+            USDT_FUTURES_PARSER, "s atom 32.7 sl 32.73 tp 50% 75% force", s)
         s.correct(34)
-        self.assertTrue(s.force_limit_order)
         self.assertEqual(s.targets, [32.685, 32.6775])
 
     def test_8(self):

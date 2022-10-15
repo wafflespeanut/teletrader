@@ -103,7 +103,6 @@ class BinanceFuturesClient(FuturesExchangeClient):
                 "side": req.side,
                 "positionSide": req.position_side,
                 "type": req.otype,
-                "newClientOrderId": req.client_id,
                 "quantity": req.quantity,
             }
             if req.otype == OrderType.LIMIT:
@@ -113,14 +112,14 @@ class BinanceFuturesClient(FuturesExchangeClient):
                 params["stopPrice"] = req.stop_price
                 params["price"] = req.limit_price
             resp = await self._inner.futures_create_order(**params)
-            return Order(resp["orderId"])
+            return Order(resp["orderId"], resp)
         except Exception as err:
-            logging.error(f"Failed to create order: {err}, params: {json.dumps(params)}")
             if isinstance(err, BinanceAPIException):
                 if err.code == -2021:
                     raise EntryCrossedException(req.price)
                 elif err.code == -2019:
                     raise InsufficientMarginException()
+            raise err
 
     async def get_symbol_price(self, symbol):
         symbol = symbol.upper()
@@ -191,12 +190,11 @@ class BinanceFuturesClient(FuturesExchangeClient):
                     await self._bal_upd_hdr(self.balance)
         elif msg["e"] == UserEventType.OrderTradeUpdate:
             info = msg["o"]
-            order_id, client_id = info["i"], info["c"]
-            price, quantity = float(info["ap"]), float(info["q"])
+            order_id, price, quantity = info["i"], float(info["ap"]), float(info["q"])
             if info["X"] == "FILLED":
-                await self._ord_fill_hdr(OrderFillEvent(order_id, client_id, price, quantity))
+                await self._ord_fill_hdr(OrderFillEvent(order_id, price, quantity))
             if info["X"] == "CANCELED":
-                await self._ord_cancel_hdr(OrderCancelEvent(order_id, client_id))
+                await self._ord_cancel_hdr(OrderCancelEvent(order_id))
 
     def _subscribe_futures_symbol_prices(self):
         symbols = list(self.symbols.keys())

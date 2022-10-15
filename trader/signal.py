@@ -5,7 +5,7 @@ from .errors import (CloseTradeException, ModifyRiskException,
                      MoveStopLossException, ModifyTargetsException)
 
 
-CHANNEL_BINANCE_USDT_FUTURES = -1001271281417
+BINANCE_USDT_FUTURES = -1001271281417
 
 
 def extract_optional_number(line: str):
@@ -15,14 +15,12 @@ def extract_optional_number(line: str):
 
 class Signal:
     MIN_PRECISION = 6
-    MIN_LEV = 20  # for sufficient margin
-    DEFAULT_LEV = 20
     DEFAULT_RISK = 0.01
     DEFAULT_RISK_FACTOR = 1
 
     def __init__(self, asset, quote, sl, is_long=True, stop_percent=False, entry=None,
                  targets=[], leverage=None, risk_factor=None, soft_sl=False,
-                 percent_targets=False, force_limit=False, tag=None):
+                 percent_targets=False, tag=None):
         self.asset = asset.upper()
         self.quote = quote.upper()
         self.sl = sl
@@ -35,9 +33,9 @@ class Signal:
             (risk_factor if risk_factor else self.DEFAULT_RISK_FACTOR)
         self.soft_sl = soft_sl
         self.percent_targets = percent_targets
-        self.force_limit_order = force_limit
-        self.tag = tag
+        self.tag = self.asset
         self.fraction = 0
+        self.is_market_order = entry is None
 
     @property
     def risk_factor(self):
@@ -112,9 +110,10 @@ class FuturesParser:
             raise CloseTradeException(tag=text.split(" ")[1].lower())
 
         sig, tag, parts = [None] * 3
-        if text.startswith("long") or text.startswith("short"):
+        if (text.startswith("long ") or text.startswith("short ") or
+                text.startswith("l ") or text.startswith("s ")):
             parts = text.split(" ")
-            is_long = parts.pop(0) == "long"
+            is_long = parts.pop(0) in ("long", "l")
             sig = Signal(parts.pop(0), self.quote, 0, is_long=is_long)
             res = extract_optional_number(parts[0])
             if res:
@@ -165,12 +164,9 @@ class FuturesParser:
         if len(parts) > 1 and parts[0] == "risk":
             parts.pop(0)
             sig.risk_factor = float(parts.pop(0))
-        if "force" in parts:
-            sig.force_limit_order = True
-            assert sig.entry
         return sig
 
 
 CHANNELS = {
-    CHANNEL_BINANCE_USDT_FUTURES: FuturesParser("USDT"),
+    BINANCE_USDT_FUTURES: FuturesParser("USDT"),
 }

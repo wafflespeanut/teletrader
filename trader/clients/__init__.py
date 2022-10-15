@@ -20,12 +20,11 @@ class OrderPositionSide:
 
 
 class OrderRequest:
-    def __init__(self, symbol, side, client_id, quantity, position_side):
+    def __init__(self, symbol, side, quantity, position_side):
         self.symbol = symbol
         self.side = side
         self.otype = OrderType.MARKET
         self.position_side = position_side
-        self.client_id = client_id
         self.quantity = quantity
         self.price = None
         self.stop_price = None
@@ -41,14 +40,14 @@ class OrderRequest:
 
 
 class Order:
-    def __init__(self, order_id):
+    def __init__(self, order_id, response=None):
         self.order_id = order_id
+        self.response = response
 
 
 class OrderFillEvent:
-    def __init__(self, order_id, client_id, symbol, price):
+    def __init__(self, order_id, symbol, price):
         self.order_id = order_id
-        self.client_id = client_id
         self.price = price
         self.symbol = symbol
 
@@ -59,9 +58,8 @@ class AccountBalanceEvent:
 
 
 class OrderCancelEvent:
-    def __init__(self, order_id, client_id):
+    def __init__(self, order_id):
         self.order_id = order_id
-        self.client_id = client_id
 
 
 class FuturesExchangeClient:
